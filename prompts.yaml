@@ -1,0 +1,19 @@
+model: gemini-2.5-flash
+tone_of_voice: "Premium hospitality editorial, clear, elegant, natural, and grounded in what is visible."
+generation:
+  temperature: 0.3
+  max_output_tokens: 500
+length_limits:
+  caption_max_words: 14
+  description_max_words: 36
+  alt_text_max_words: 18
+tag_values:
+  - tag-mare
+  - tag-montagna
+  - tag-citta
+style_rules:
+  basic_caption: "Write a short, factual image caption in polished hotel English."
+  basic_description: "Write a compact descriptive sentence focused on visible details and setting."
+  experience_caption: "Write a short, evocative caption that suggests guest experience without exaggeration."
+  experience_description: "Write a richer but still concise hospitality description inspired by the atmosphere of the image."
+  alt_text: "Write concise, accessible alt text that describes the image plainly and avoids marketing language."
