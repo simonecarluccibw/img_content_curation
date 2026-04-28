@@ -1,11 +1,11 @@
 # Hotel Image Caption Pipeline
 
-Batch-oriented CLI that reads an ICEPortal CSV once, groups rows by hotel, and writes one enriched CSV per hotel with AI-generated captions, descriptions, alt text, and a forced tourism tag.
+Batch-oriented CLI that reads an ICEPortal CSV once, groups rows by hotel, runs two Gemini Vision calls per image, and writes one enriched CSV per hotel plus a per-run JSONL log.
 
 ## Repository structure
 
 - `pipeline.py`: main CLI
-- `prompts.yaml`: editable tone of voice and prompt rules
+- `prompts.yaml`: editable tone of voice, generation settings, classification settings, and amenity taxonomy
 - `.devcontainer/devcontainer.json`: GitHub Codespaces setup
 - `.env.example`: local environment template
 
@@ -25,7 +25,7 @@ The dev container installs Python 3.11 and `requirements.txt` automatically.
 
 ## Local setup
 
-Create a virtual environment if you want, then install dependencies:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -37,7 +37,7 @@ Set your API key:
 cp .env.example .env
 ```
 
-Then export `GEMINI_API_KEY` in your shell or configure it in your IDE terminal session.
+Then put your real key inside `.env`. The CLI automatically loads `.env` from the project root before parsing arguments.
 
 ## Input expectations
 
@@ -101,6 +101,13 @@ The script writes one file per hotel in `output_hotels/` using this pattern:
 
 Each output CSV keeps all original columns and appends:
 
+- `AI_Amenity_Category`   (Altro if no category exceeds score 0.4)
+- `AI_Amenity_Codes`
+- `AI_Amenity_Maxcategoria`
+- `AI_Amenity_CustomTag1`
+- `AI_Amenity_CustomTag2`
+- `AI_Amenity_CustomTag3`
+- `AI_Amenity_CustomTag4`
 - `AI_Caption_Basic`
 - `AI_Description_Basic`
 - `AI_Caption_Experience`
@@ -108,10 +115,39 @@ Each output CSV keeps all original columns and appends:
 - `AI_Image_Tag`
 - `AI_Alt_Text`
 
+## Dry-run
+
+```bash
+python pipeline.py --input "file.csv" --next-hotels 5 --dry-run
+```
+
+Prints an estimate of images, API calls, and cost per hotel and total. It does not download or process any image.
+
+## Logging
+
+Each run creates `logs/pipeline_YYYYMMDD_HHMMSS.log` in JSONL format. There is one row per image step.
+
+Logged fields include:
+
+- `timestamp`
+- `propid`
+- `hotel_name`
+- `asset_fileid`
+- `asset_index`
+- `asset_caption`
+- `asset_link`
+- `step` (`classification` / `generation` / `error`)
+- `ai_amenity_score`
+- `duration_ms`
+- `error`
+
 ## Notes
 
 - If an image or API call fails, the row is still written and the AI columns remain empty for that image.
 - Existing hotel files are skipped unless you pass `--force`.
 - Name-based selection must match the CSV exactly after whitespace normalization.
-- `--hotel-name` values are not comma-split, so names containing commas work correctly.
-- `output_hotels/`, `.env`, and temporary files are ignored by Git.
+- `output_hotels/`, `.env`, logs, and checkpoint sidecars are ignored by Git.
+- The checkpoint saves progress image by image in a `.progress.jsonl` file in the same directory as the output CSV.
+- If the process is interrupted, rerunning the same command resumes from the last unprocessed image.
+- The sidecar is deleted automatically when the hotel completes successfully.
+- If you want to restart a partially processed hotel from scratch, delete the corresponding `.progress.jsonl` file manually.
