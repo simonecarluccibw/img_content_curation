@@ -101,19 +101,28 @@ The script writes one file per hotel in `output_hotels/` using this pattern:
 
 Each output CSV keeps all original columns and appends:
 
-- `AI_Amenity_Category`   (Altro if no category exceeds score 0.4)
-- `AI_Amenity_Codes`
-- `AI_Amenity_Maxcategoria`
-- `AI_Amenity_CustomTag1`
-- `AI_Amenity_CustomTag2`
-- `AI_Amenity_CustomTag3`
-- `AI_Amenity_CustomTag4`
-- `AI_Caption_Basic`
-- `AI_Description_Basic`
-- `AI_Caption_Experience`
-- `AI_Description_Experience`
-- `AI_Image_Tag`
-- `AI_Alt_Text`
+- `Amenity_Category`   (`Altro` if no category exceeds score 0.4)
+- `Amenity_Codes`
+- `Amenity_MaxCategory`
+- `Amenity_CustomTag1`
+- `Amenity_CustomTag2`
+- `Amenity_CustomTag3`
+- `Amenity_CustomTag4`
+- `Amenity_CustomTags` (comma-separated union of the four custom tag columns)
+- `Caption_Basic`
+- `Description_Basic`
+- `Caption_Experience`
+- `Description_Experience`
+- `Alt_Text`
+- `Check_Room` (`1` if the image clearly shows a hotel guest room or its private bathroom, otherwise `0`)
+
+The pipeline also maintains a cumulative file:
+
+```text
+output_hotels/all_hotels_cumulative.csv
+```
+
+This file is persistent across runs. When a hotel is processed again, all of its rows in the cumulative file are replaced by the latest version.
 
 ## Dry-run
 
@@ -122,6 +131,32 @@ python pipeline.py --input "file.csv" --next-hotels 5 --dry-run
 ```
 
 Prints an estimate of images, API calls, and cost per hotel and total. It does not download or process any image.
+
+## Performance
+
+- Conservative default: `--workers 5` for about 7 hours total runtime.
+- Recommended with Gemini Tier 1: `--workers 15` for about 2.5 hours total runtime.
+- Do not exceed 20 workers: Gemini rate limits (1,000 RPM) and image downloads become the bottleneck before CPU.
+- Output CSV row order always matches the source CSV, regardless of thread completion order.
+
+Example:
+
+```bash
+python pipeline.py --input data.csv --next-hotels 10 --workers 15
+```
+
+Expected end-to-end concurrent workflow:
+
+```bash
+# Estimate with 15 workers
+python pipeline.py --input data.csv --next-hotels 10 --workers 15 --dry-run
+
+# Process with 15 workers
+python pipeline.py --input data.csv --next-hotels 10 --workers 15
+
+# Resume after interruption with the same command
+python pipeline.py --input data.csv --next-hotels 10 --workers 15
+```
 
 ## Logging
 
@@ -141,9 +176,17 @@ Logged fields include:
 - `duration_ms`
 - `error`
 
+For deeper diagnostics, enable:
+
+```bash
+python pipeline.py --input "file.csv" --propid 77519 --debug-log
+```
+
+With `--debug-log`, the JSONL file also captures retry attempts, parse failures, checkpoint hits, wait times, HTTP status codes, and short excerpts of raw Gemini responses when formatting breaks.
+
 ## Notes
 
-- If an image or API call fails, the row is still written and the AI columns remain empty for that image.
+- If an image or API call fails, the row is still written and the generated metadata columns remain empty for that image.
 - Existing hotel files are skipped unless you pass `--force`.
 - Name-based selection must match the CSV exactly after whitespace normalization.
 - `output_hotels/`, `.env`, logs, and checkpoint sidecars are ignored by Git.
@@ -151,3 +194,5 @@ Logged fields include:
 - If the process is interrupted, rerunning the same command resumes from the last unprocessed image.
 - The sidecar is deleted automatically when the hotel completes successfully.
 - If you want to restart a partially processed hotel from scratch, delete the corresponding `.progress.jsonl` file manually.
+- The cumulative CSV is updated after each hotel completes successfully, and `--force` fully realigns that hotel's rows with the newest run.
+- If a hotel CSV already exists and is skipped, its rows are still synchronized into the cumulative CSV.

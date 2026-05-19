@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -23,26 +24,34 @@ except ImportError:  # pragma: no cover - optional dependency
     yaml = None
 
 
-AI_COLUMNS = [
-    "AI_Caption_Basic",
-    "AI_Description_Basic",
-    "AI_Caption_Experience",
-    "AI_Description_Experience",
-    "AI_Image_Tag",
-    "AI_Alt_Text",
-]
-ALLOWED_TAGS = {"tag-mare", "tag-montagna", "tag-citta"}
 AMENITY_COLUMNS = [
-    "AI_Amenity_Category",
-    "AI_Amenity_Codes",
-    "AI_Amenity_Maxcategoria",
-    "AI_Amenity_CustomTag1",
-    "AI_Amenity_CustomTag2",
-    "AI_Amenity_CustomTag3",
-    "AI_Amenity_CustomTag4",
+    "Amenity_Category",
+    "Amenity_Codes",
+    "Amenity_MaxCategory",
+    "Amenity_CustomTag1",
+    "Amenity_CustomTag2",
+    "Amenity_CustomTag3",
+    "Amenity_CustomTag4",
+    "Amenity_CustomTags",
+]
+CONTENT_COLUMNS = [
+    "Caption_Basic",
+    "Description_Basic",
+    "Caption_Experience",
+    "Description_Experience",
+    "Alt_Text",
+    "Check_Room",
 ]
 CLASSIFICATION_SCORE_THRESHOLD = 0.4
 ALTRO = "Altro"
+CLASSIFICATION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "category": {"type": "STRING"},
+        "score": {"type": "NUMBER"},
+    },
+    "required": ["category", "score"],
+}
 
 
 class RunLogger:
@@ -51,13 +60,35 @@ class RunLogger:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         self._path = log_dir / f"pipeline_{timestamp}.log"
         self._handle = self._path.open("w", encoding="utf-8")
+        self._lock = threading.Lock()
 
     def log(self, record: Dict) -> None:
-        self._handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._handle.flush()
+        with self._lock:
+            self._handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._handle.flush()
 
     def close(self) -> None:
         self._handle.close()
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+
+def shorten_text(value: str, limit: int = 400) -> str:
+    compact = " ".join((value or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "...<truncated>"
+
+
+def log_debug_event(
+    logger: RunLogger,
+    debug_log: bool,
+    record: Dict,
+) -> None:
+    if debug_log:
+        logger.log(record)
 
 
 def load_dotenv(dotenv_path: Path) -> None:
@@ -133,6 +164,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional delay in seconds between image requests.",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=5,
+        help="Number of parallel threads for image processing within a hotel. Default 5, max recommended 20.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=60,
@@ -153,6 +190,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Print a cost and call estimate without processing any image.",
+    )
+    parser.add_argument(
+        "--debug-log",
+        action="store_true",
+        help="Write detailed diagnostic records for retries, parsing failures, and raw Gemini snippets.",
     )
     args = parser.parse_args()
     if not args.api_key and not args.dry_run:
@@ -231,6 +273,10 @@ def expected_output_path(output_dir: Path, propid: str, hotel_name: str) -> Path
     return output_dir / f"{propid}_{slugify(hotel_name)}.csv"
 
 
+def cumulative_output_path(output_dir: Path) -> Path:
+    return output_dir / "all_hotels_cumulative.csv"
+
+
 def resolve_hotels(
     args: argparse.Namespace,
     groups: Dict[str, List[Dict[str, str]]],
@@ -304,8 +350,10 @@ def extract_json_text(api_response: Dict) -> str:
     candidates = api_response.get("candidates") or []
     if not candidates:
         raise RuntimeError("Gemini response has no candidates.")
-    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
-    texts = [part.get("text", "") for part in parts if "text" in part]
+    texts: List[str] = []
+    for candidate in candidates:
+        parts = (((candidate or {}).get("content") or {}).get("parts") or [])
+        texts.extend(part.get("text", "") for part in parts if "text" in part)
     raw = "".join(texts).strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
@@ -313,6 +361,26 @@ def extract_json_text(api_response: Dict) -> str:
     if not raw:
         raise RuntimeError("Gemini returned an empty text payload.")
     return raw
+
+
+def summarize_api_response(api_response: Dict, limit: int = 1200) -> str:
+    try:
+        serialized = json.dumps(api_response, ensure_ascii=False)
+    except Exception:
+        serialized = str(api_response)
+    return shorten_text(serialized, limit=limit)
+
+
+def build_thinking_config(section: Dict) -> Dict:
+    budget = section.get("thinking_budget", 0)
+    return {"thinkingBudget": budget}
+
+
+def extract_finish_reason(api_response: Dict) -> str:
+    candidates = api_response.get("candidates") or []
+    if not candidates:
+        return ""
+    return str((candidates[0] or {}).get("finishReason", ""))
 
 
 def extract_first_json_object(raw_text: str) -> str:
@@ -343,22 +411,66 @@ def extract_first_json_object(raw_text: str) -> str:
     raise RuntimeError(f"Gemini returned an unterminated JSON object: {raw_text[:200]}")
 
 
-def coerce_tag(value: str) -> str:
-    cleaned = (value or "").strip().casefold()
-    if cleaned in ALLOWED_TAGS:
-        return cleaned
-    if any(token in cleaned for token in ("mare", "sea", "beach", "coast", "ocean")):
-        return "tag-mare"
-    if any(token in cleaned for token in ("mont", "mount", "alps", "ski", "hill")):
-        return "tag-montagna"
-    return "tag-citta"
+def coerce_check_room(value: object) -> str:
+    cleaned = str(value or "").strip().casefold()
+    if cleaned in {"1", "true", "yes", "y"}:
+        return "1"
+    if cleaned in {"0", "false", "no", "n"}:
+        return "0"
+    try:
+        return "1" if int(float(cleaned)) == 1 else "0"
+    except ValueError:
+        return "0"
+
+
+def join_custom_tags(values: Sequence[str]) -> str:
+    return ", ".join(value.strip() for value in values if value and value.strip())
+
+
+def harmonize_row_schema(row: Dict[str, str]) -> Dict[str, str]:
+    normalized = dict(row)
+    normalized["Amenity_Category"] = normalized.get("Amenity_Category") or normalized.get("AI_Amenity_Category", "")
+    normalized["Amenity_Codes"] = normalized.get("Amenity_Codes") or normalized.get("AI_Amenity_Codes", "")
+    normalized["Amenity_MaxCategory"] = normalized.get("Amenity_MaxCategory") or normalized.get(
+        "AI_Amenity_Maxcategoria", ""
+    )
+    normalized["Amenity_CustomTag1"] = normalized.get("Amenity_CustomTag1") or normalized.get(
+        "AI_Amenity_CustomTag1", ""
+    )
+    normalized["Amenity_CustomTag2"] = normalized.get("Amenity_CustomTag2") or normalized.get(
+        "AI_Amenity_CustomTag2", ""
+    )
+    normalized["Amenity_CustomTag3"] = normalized.get("Amenity_CustomTag3") or normalized.get(
+        "AI_Amenity_CustomTag3", ""
+    )
+    normalized["Amenity_CustomTag4"] = normalized.get("Amenity_CustomTag4") or normalized.get(
+        "AI_Amenity_CustomTag4", ""
+    )
+    normalized["Caption_Basic"] = normalized.get("Caption_Basic") or normalized.get("AI_Caption_Basic", "")
+    normalized["Description_Basic"] = normalized.get("Description_Basic") or normalized.get("AI_Description_Basic", "")
+    normalized["Caption_Experience"] = normalized.get("Caption_Experience") or normalized.get(
+        "AI_Caption_Experience", ""
+    )
+    normalized["Description_Experience"] = normalized.get("Description_Experience") or normalized.get(
+        "AI_Description_Experience", ""
+    )
+    normalized["Alt_Text"] = normalized.get("Alt_Text") or normalized.get("AI_Alt_Text", "")
+    normalized["Check_Room"] = coerce_check_room(
+        normalized.get("Check_Room", normalized.get("AI_Check_Room", "0"))
+    )
+    normalized["Amenity_CustomTags"] = join_custom_tags([
+        normalized.get("Amenity_CustomTag1", ""),
+        normalized.get("Amenity_CustomTag2", ""),
+        normalized.get("Amenity_CustomTag3", ""),
+        normalized.get("Amenity_CustomTag4", ""),
+    ])
+    return normalized
 
 
 def build_prompt(row: Dict[str, str], config: Dict) -> str:
     tone = config.get("tone_of_voice", "").strip()
     style = config.get("style_rules", {})
     limits = config.get("length_limits", {})
-    tags = ", ".join(config.get("tag_values", sorted(ALLOWED_TAGS)))
     context_lines = [
         f"Hotel name: {row.get('Listing_Name', '').strip()}",
         f"Brand: {row.get('Listing_Brand', '').strip()}",
@@ -377,17 +489,17 @@ def build_prompt(row: Dict[str, str], config: Dict) -> str:
         f"Caption max words: {limits.get('caption_max_words', 14)}\n"
         f"Description max words: {limits.get('description_max_words', 36)}\n"
         f"Alt text max words: {limits.get('alt_text_max_words', 18)}\n"
-        f"Allowed tags: {tags}\n"
         "Rules:\n"
         "- Describe only what is visible in the image.\n"
         "- Avoid unverifiable claims, room types, amenities, or views unless clearly visible.\n"
         "- Keep the basic outputs factual and commercially neutral.\n"
         "- Keep the experience outputs more evocative, but still grounded in the visual content.\n"
         "- Alt text must be accessible, concise, and non-promotional.\n"
-        "- Always return exactly one allowed tag, even for indoor images.\n"
+        "- Set Check_Room to 1 only if the image clearly shows a hotel guest room or its private bathroom.\n"
+        "- Set Check_Room to 0 for all other hotel scenes.\n"
         "- Return valid JSON only.\n"
         "Return an object with exactly these keys:\n"
-        'AI_Caption_Basic, AI_Description_Basic, AI_Caption_Experience, AI_Description_Experience, AI_Image_Tag, AI_Alt_Text.\n'
+        'Caption_Basic, Description_Basic, Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n'
         "Image context:\n"
         + "\n".join(context_lines)
     )
@@ -408,21 +520,82 @@ def build_classification_prompt(row: Dict[str, str], taxonomy: List[Dict]) -> st
         "Rules:\n"
         "- Assign the single most appropriate category based on what is visually dominant in the image.\n"
         "- The caption is a hint, not ground truth - trust the image first.\n"
+        "- A guest room or a private bathroom is not an amenity category unless another listed amenity is visually dominant.\n"
         f"- If no category fits with confidence >= {CLASSIFICATION_SCORE_THRESHOLD}, return Altro.\n"
         "- Return valid JSON only, no explanation, no markdown.\n"
         'Return exactly: {"category": "<category name or Altro>", "score": <float 0.0-1.0>}'
     )
 
 
+def build_classification_fallback_prompt(row: Dict[str, str], taxonomy: List[Dict]) -> str:
+    categories = ", ".join([entry["category"] for entry in taxonomy] + [ALTRO])
+    return (
+        "Classify this hotel image into exactly one category.\n"
+        f"Allowed categories: {categories}\n"
+        f"Existing caption: {row.get('Asset_Caption', '').strip()}\n"
+        f"Hotel name: {row.get('Listing_Name', '').strip()}\n"
+        "Output exactly one line in this format only:\n"
+        "<category>|||<score>\n"
+        "Rules:\n"
+        "- Score must be a decimal between 0.0 and 1.0.\n"
+        "- A guest room or a private bathroom alone should map to Altro.\n"
+        f"- If uncertain below {CLASSIFICATION_SCORE_THRESHOLD}, output Altro.\n"
+        "- Do not add any extra words."
+    )
+
+
+def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, float]:
+    text = raw_text.strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty classification payload.")
+
+    try:
+        parsed = json.loads(extract_first_json_object(text))
+        category = str(parsed.get("category", ALTRO)).strip()
+        score = float(parsed.get("score", 0.0))
+        return {"category": category or ALTRO, "score": score}
+    except (ValueError, json.JSONDecodeError, RuntimeError):
+        pass
+
+    if "|||" in text:
+        category_part, score_part = text.split("|||", 1)
+        category = category_part.strip() or ALTRO
+        try:
+            score = float(score_part.strip())
+        except ValueError:
+            score = 0.0
+        return {"category": category, "score": score}
+
+    lowered = text.casefold()
+    matched_category = None
+    for entry in taxonomy:
+        if entry["category"].casefold() in lowered:
+            matched_category = entry["category"]
+            break
+    if matched_category is None and ALTRO.casefold() in lowered:
+        matched_category = ALTRO
+
+    score_match = re.search(r"([01](?:\.\d+)?)", text)
+    score = float(score_match.group(1)) if score_match else 0.0
+    if matched_category:
+        return {"category": matched_category, "score": score}
+    raise RuntimeError(f"Gemini returned no recognizable classification payload: {text[:200]}")
+
+
 def call_gemini_classification(
     image_bytes: bytes,
     mime_type: str,
     prompt: str,
+    fallback_prompt: str,
     api_key: str,
     model: str,
     config: Dict,
+    taxonomy: List[Dict],
     timeout: int,
     max_retries: int,
+    logger: RunLogger,
+    log_context: Dict,
+    debug_log: bool,
 ) -> Dict:
     payload = {
         "contents": [
@@ -442,6 +615,8 @@ def call_gemini_classification(
             "temperature": config.get("classification", {}).get("temperature", 0.1),
             "maxOutputTokens": config.get("classification", {}).get("max_output_tokens", 100),
             "responseMimeType": "application/json",
+            "responseSchema": CLASSIFICATION_RESPONSE_SCHEMA,
+            "thinkingConfig": build_thinking_config(config.get("classification", {})),
         },
     }
     endpoint = (
@@ -459,26 +634,157 @@ def call_gemini_classification(
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
-                parsed = json.loads(extract_first_json_object(extract_json_text(response_data)))
-                category = str(parsed.get("category", ALTRO)).strip()
-                score = float(parsed.get("score", 0.0))
-                return {"category": category, "score": score}
+                raw_text = extract_json_text(response_data)
+                try:
+                    return parse_classification_text(raw_text, taxonomy)
+                except Exception as parse_exc:
+                    log_debug_event(logger, debug_log, {
+                        **log_context,
+                        "step": "classification_parse_error",
+                        "attempt": attempt,
+                        "duration_ms": None,
+                        "error": str(parse_exc),
+                        "finish_reason": extract_finish_reason(response_data),
+                        "raw_response_excerpt": shorten_text(raw_text),
+                        "api_response_excerpt": summarize_api_response(response_data),
+                    })
+                    raise
         except urllib.error.HTTPError as exc:
             last_error = exc
             if exc.code == 429:
                 retry_after = exc.headers.get("Retry-After")
                 wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+                log_debug_event(logger, debug_log, {
+                    **log_context,
+                    "step": "classification_retry",
+                    "attempt": attempt,
+                    "http_status": exc.code,
+                    "retry_after": retry_after,
+                    "wait_seconds": wait,
+                    "error": str(exc),
+                })
                 time.sleep(wait)
                 continue
             if attempt == max_retries:
                 break
+            log_debug_event(logger, debug_log, {
+                **log_context,
+                "step": "classification_retry",
+                "attempt": attempt,
+                "http_status": exc.code,
+                "retry_after": None,
+                "wait_seconds": min(2.0 ** attempt, 60) + random.uniform(0, 1),
+                "error": str(exc),
+            })
             time.sleep(min(2.0 ** attempt, 60) + random.uniform(0, 1))
         except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_retries:
                 break
-            time.sleep(min(2.0 ** attempt, 60) + random.uniform(0, 1))
-    raise RuntimeError(f"Classification failed after {max_retries} attempts: {last_error}")
+            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {
+                **log_context,
+                "step": "classification_retry",
+                "attempt": attempt,
+                "http_status": None,
+                "retry_after": None,
+                "wait_seconds": wait,
+                "error": str(exc),
+            })
+            time.sleep(wait)
+    fallback_payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": fallback_prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": base64.b64encode(image_bytes).decode("ascii"),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 40,
+            "responseMimeType": "text/plain",
+        },
+    }
+    fallback_request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(fallback_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    fallback_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with urllib.request.urlopen(fallback_request, timeout=timeout) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+                raw_text = extract_json_text(response_data)
+                try:
+                    return parse_classification_text(raw_text, taxonomy)
+                except Exception as parse_exc:
+                    log_debug_event(logger, debug_log, {
+                        **log_context,
+                        "step": "classification_fallback_parse_error",
+                        "attempt": attempt,
+                        "duration_ms": None,
+                        "error": str(parse_exc),
+                        "finish_reason": extract_finish_reason(response_data),
+                        "raw_response_excerpt": shorten_text(raw_text),
+                        "api_response_excerpt": summarize_api_response(response_data),
+                    })
+                    raise
+        except urllib.error.HTTPError as exc:
+            fallback_error = exc
+            if exc.code == 429:
+                retry_after = exc.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+                log_debug_event(logger, debug_log, {
+                    **log_context,
+                    "step": "classification_fallback_retry",
+                    "attempt": attempt,
+                    "http_status": exc.code,
+                    "retry_after": retry_after,
+                    "wait_seconds": wait,
+                    "error": str(exc),
+                })
+                time.sleep(wait)
+                continue
+            if attempt == max_retries:
+                break
+            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {
+                **log_context,
+                "step": "classification_fallback_retry",
+                "attempt": attempt,
+                "http_status": exc.code,
+                "retry_after": None,
+                "wait_seconds": wait,
+                "error": str(exc),
+            })
+            time.sleep(wait)
+        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            fallback_error = exc
+            if attempt == max_retries:
+                break
+            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {
+                **log_context,
+                "step": "classification_fallback_retry",
+                "attempt": attempt,
+                "http_status": None,
+                "retry_after": None,
+                "wait_seconds": wait,
+                "error": str(exc),
+            })
+            time.sleep(wait)
+    raise RuntimeError(
+        f"Classification failed after {max_retries} attempts. JSON error: {last_error}. Fallback error: {fallback_error}"
+    )
 
 
 def call_gemini(
@@ -490,6 +796,9 @@ def call_gemini(
     config: Dict,
     timeout: int,
     max_retries: int,
+    logger: RunLogger,
+    log_context: Dict,
+    debug_log: bool,
 ) -> Dict[str, str]:
     payload = {
         "contents": [
@@ -509,6 +818,7 @@ def call_gemini(
             "temperature": config.get("generation", {}).get("temperature", 0.3),
             "maxOutputTokens": config.get("generation", {}).get("max_output_tokens", 500),
             "responseMimeType": "application/json",
+            "thinkingConfig": build_thinking_config(config.get("generation", {})),
         },
     }
     endpoint = (
@@ -526,30 +836,73 @@ def call_gemini(
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
-                parsed = json.loads(extract_first_json_object(extract_json_text(response_data)))
+                raw_text = extract_json_text(response_data)
+                try:
+                    parsed = json.loads(extract_first_json_object(raw_text))
+                except Exception as parse_exc:
+                    log_debug_event(logger, debug_log, {
+                        **log_context,
+                        "step": "generation_parse_error",
+                        "attempt": attempt,
+                        "duration_ms": None,
+                        "error": str(parse_exc),
+                        "finish_reason": extract_finish_reason(response_data),
+                        "raw_response_excerpt": shorten_text(raw_text),
+                        "api_response_excerpt": summarize_api_response(response_data),
+                    })
+                    raise
                 return {
-                    "AI_Caption_Basic": str(parsed.get("AI_Caption_Basic", "")).strip(),
-                    "AI_Description_Basic": str(parsed.get("AI_Description_Basic", "")).strip(),
-                    "AI_Caption_Experience": str(parsed.get("AI_Caption_Experience", "")).strip(),
-                    "AI_Description_Experience": str(parsed.get("AI_Description_Experience", "")).strip(),
-                    "AI_Image_Tag": coerce_tag(str(parsed.get("AI_Image_Tag", ""))),
-                    "AI_Alt_Text": str(parsed.get("AI_Alt_Text", "")).strip(),
+                    "Caption_Basic": str(parsed.get("Caption_Basic", "")).strip(),
+                    "Description_Basic": str(parsed.get("Description_Basic", "")).strip(),
+                    "Caption_Experience": str(parsed.get("Caption_Experience", "")).strip(),
+                    "Description_Experience": str(parsed.get("Description_Experience", "")).strip(),
+                    "Alt_Text": str(parsed.get("Alt_Text", "")).strip(),
+                    "Check_Room": coerce_check_room(parsed.get("Check_Room", "0")),
                 }
         except urllib.error.HTTPError as exc:
             last_error = exc
             if exc.code == 429:
                 retry_after = exc.headers.get("Retry-After")
                 wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+                log_debug_event(logger, debug_log, {
+                    **log_context,
+                    "step": "generation_retry",
+                    "attempt": attempt,
+                    "http_status": exc.code,
+                    "retry_after": retry_after,
+                    "wait_seconds": wait,
+                    "error": str(exc),
+                })
                 time.sleep(wait)
                 continue
             if attempt == max_retries:
                 break
-            time.sleep(min(2.0 ** attempt, 60) + random.uniform(0, 1))
+            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {
+                **log_context,
+                "step": "generation_retry",
+                "attempt": attempt,
+                "http_status": exc.code,
+                "retry_after": None,
+                "wait_seconds": wait,
+                "error": str(exc),
+            })
+            time.sleep(wait)
         except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_retries:
                 break
-            time.sleep(min(2.0 ** attempt, 60) + random.uniform(0, 1))
+            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {
+                **log_context,
+                "step": "generation_retry",
+                "attempt": attempt,
+                "http_status": None,
+                "retry_after": None,
+                "wait_seconds": wait,
+                "error": str(exc),
+            })
+            time.sleep(wait)
     raise RuntimeError(f"Generation failed after {max_retries} attempts: {last_error}")
 
 
@@ -560,20 +913,26 @@ def resolve_amenity_fields(
 ) -> Dict[str, str]:
     empty = {col: "" for col in AMENITY_COLUMNS}
     if score < CLASSIFICATION_SCORE_THRESHOLD or category == ALTRO:
-        empty["AI_Amenity_Category"] = ALTRO
+        empty["Amenity_Category"] = ALTRO
         return empty
     for entry in taxonomy:
         if entry["category"] == category:
             return {
-                "AI_Amenity_Category": entry["category"],
-                "AI_Amenity_Codes": entry["codes"],
-                "AI_Amenity_Maxcategoria": entry["maxcategoria"],
-                "AI_Amenity_CustomTag1": entry["custom_tag_1"],
-                "AI_Amenity_CustomTag2": entry["custom_tag_2"],
-                "AI_Amenity_CustomTag3": entry["custom_tag_3"],
-                "AI_Amenity_CustomTag4": entry["custom_tag_4"],
+                "Amenity_Category": entry["category"],
+                "Amenity_Codes": entry["codes"],
+                "Amenity_MaxCategory": entry["maxcategoria"],
+                "Amenity_CustomTag1": entry["custom_tag_1"],
+                "Amenity_CustomTag2": entry["custom_tag_2"],
+                "Amenity_CustomTag3": entry["custom_tag_3"],
+                "Amenity_CustomTag4": entry["custom_tag_4"],
+                "Amenity_CustomTags": join_custom_tags([
+                    entry["custom_tag_1"],
+                    entry["custom_tag_2"],
+                    entry["custom_tag_3"],
+                    entry["custom_tag_4"],
+                ]),
             }
-    empty["AI_Amenity_Category"] = ALTRO
+    empty["Amenity_Category"] = ALTRO
     return empty
 
 
@@ -585,6 +944,9 @@ def enrich_row(
     taxonomy: List[Dict],
     timeout: int,
     max_retries: int,
+    logger: RunLogger,
+    log_context: Dict,
+    debug_log: bool,
 ) -> Dict:
     image_url = (row.get("Asset_Link") or "").strip()
     if not image_url:
@@ -597,16 +959,34 @@ def enrich_row(
 
     t0 = time.perf_counter()
     classification_prompt = build_classification_prompt(row, taxonomy)
-    classification_result = call_gemini_classification(
-        image_bytes=image_bytes,
-        mime_type=mime_type,
-        prompt=classification_prompt,
-        api_key=api_key,
-        model=model,
-        config=config,
-        timeout=timeout,
-        max_retries=max_retries,
-    )
+    classification_fallback_prompt = build_classification_fallback_prompt(row, taxonomy)
+    classification_error = None
+    try:
+        classification_result = call_gemini_classification(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            prompt=classification_prompt,
+            fallback_prompt=classification_fallback_prompt,
+            api_key=api_key,
+            model=model,
+            config=config,
+            taxonomy=taxonomy,
+            timeout=timeout,
+            max_retries=max_retries,
+            logger=logger,
+            log_context=log_context,
+            debug_log=debug_log,
+        )
+    except Exception as exc:
+        classification_error = str(exc)
+        classification_result = {"category": ALTRO, "score": 0.0}
+        log_debug_event(logger, True, {
+            **log_context,
+            "step": "classification_fallback_altro",
+            "attempt": None,
+            "duration_ms": None,
+            "error": classification_error,
+        })
     classification_ms = int((time.perf_counter() - t0) * 1000)
     amenity_fields = resolve_amenity_fields(
         classification_result["category"],
@@ -625,6 +1005,9 @@ def enrich_row(
         config=config,
         timeout=timeout,
         max_retries=max_retries,
+        logger=logger,
+        log_context=log_context,
+        debug_log=debug_log,
     )
     generation_ms = int((time.perf_counter() - t1) * 1000)
 
@@ -634,6 +1017,7 @@ def enrich_row(
         "_classification_score": classification_result["score"],
         "_classification_ms": classification_ms,
         "_generation_ms": generation_ms,
+        "_classification_error": classification_error,
     }
 
 
@@ -650,16 +1034,28 @@ def load_checkpoint(sidecar: Path) -> Dict[str, Dict]:
             line = line.strip()
             if line:
                 record = json.loads(line)
-                checkpoint[record["asset_fileid"]] = record["enriched_row"]
+                checkpoint[record["asset_fileid"]] = harmonize_row_schema(record["enriched_row"])
     return checkpoint
 
 
-def append_checkpoint(sidecar: Path, asset_fileid: str, enriched_row: Dict) -> None:
-    with sidecar.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps({"asset_fileid": asset_fileid, "enriched_row": enriched_row}, ensure_ascii=False) + "\n"
-        )
-        handle.flush()
+def append_checkpoint(
+    sidecar: Path,
+    asset_fileid: str,
+    enriched_row: Dict,
+    lock: "threading.Lock | None" = None,
+) -> None:
+    def _write() -> None:
+        with sidecar.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"asset_fileid": asset_fileid, "enriched_row": enriched_row}, ensure_ascii=False) + "\n"
+            )
+            handle.flush()
+
+    if lock is not None:
+        with lock:
+            _write()
+    else:
+        _write()
 
 
 def write_hotel_csv(path: Path, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
@@ -679,6 +1075,159 @@ def write_hotel_csv(path: Path, fieldnames: List[str], rows: List[Dict[str, str]
     temp_path.replace(path)
 
 
+def read_output_csv(path: Path) -> List[Dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=";")
+        return [harmonize_row_schema(row) for row in reader]
+
+
+def update_cumulative_csv(
+    cumulative_path: Path,
+    fieldnames: List[str],
+    propid: str,
+    hotel_rows: List[Dict[str, str]],
+) -> None:
+    existing_rows: List[Dict[str, str]] = []
+    if cumulative_path.exists():
+        existing_rows = read_output_csv(cumulative_path)
+    remaining_rows = [
+        row
+        for row in existing_rows
+        if (row.get("Listing_MappedID") or "").strip() != propid
+    ]
+    write_hotel_csv(
+        cumulative_path,
+        fieldnames,
+        remaining_rows + [harmonize_row_schema(row) for row in hotel_rows],
+    )
+
+
+def _process_single_image(
+    index: int,
+    total: int,
+    row: Dict[str, str],
+    propid: str,
+    hotel_name: str,
+    args: argparse.Namespace,
+    config: Dict,
+    model: str,
+    taxonomy: List[Dict],
+    logger: RunLogger,
+    sidecar: Path,
+    checkpoint_lock: "threading.Lock",
+) -> Dict[str, str]:
+    asset_fileid = row.get("Asset_FileID", "")
+    enriched = harmonize_row_schema(row)
+    log_context = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "propid": propid,
+        "hotel_name": hotel_name,
+        "asset_fileid": asset_fileid,
+        "asset_index": row.get("Asset_Index", ""),
+        "asset_caption": row.get("Asset_Caption", ""),
+        "asset_link": row.get("Asset_Link", ""),
+    }
+
+    try:
+        log_debug_event(logger, args.debug_log, {
+            **log_context,
+            "step": "row_start",
+            "error": None,
+        })
+        ai_values = enrich_row(
+            row=row,
+            api_key=args.api_key,
+            model=model,
+            config=config,
+            taxonomy=taxonomy,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+            logger=logger,
+            log_context=log_context,
+            debug_log=args.debug_log,
+        )
+        score = ai_values.pop("_classification_score", None)
+        classification_ms = ai_values.pop("_classification_ms", 0)
+        generation_ms = ai_values.pop("_generation_ms", 0)
+        classification_error = ai_values.pop("_classification_error", None)
+        enriched.update(ai_values)
+
+        logger.log({
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "propid": propid,
+            "hotel_name": hotel_name,
+            "asset_fileid": asset_fileid,
+            "asset_index": row.get("Asset_Index", ""),
+            "asset_caption": row.get("Asset_Caption", ""),
+            "asset_link": row.get("Asset_Link", ""),
+            "step": "classification",
+            "ai_amenity_category": enriched.get("Amenity_Category"),
+            "ai_amenity_score": score,
+            "duration_ms": classification_ms,
+            "error": classification_error,
+        })
+        logger.log({
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "propid": propid,
+            "hotel_name": hotel_name,
+            "asset_fileid": asset_fileid,
+            "asset_index": row.get("Asset_Index", ""),
+            "asset_caption": row.get("Asset_Caption", ""),
+            "asset_link": row.get("Asset_Link", ""),
+            "step": "generation",
+            "Caption_Basic": enriched.get("Caption_Basic"),
+            "Description_Basic": enriched.get("Description_Basic"),
+            "Caption_Experience": enriched.get("Caption_Experience"),
+            "Description_Experience": enriched.get("Description_Experience"),
+            "Alt_Text": enriched.get("Alt_Text"),
+            "Check_Room": enriched.get("Check_Room"),
+            "duration_ms": generation_ms,
+            "error": None,
+        })
+        log_debug_event(logger, args.debug_log, {
+            **log_context,
+            "step": "row_done",
+            "classification_duration_ms": classification_ms,
+            "generation_duration_ms": generation_ms,
+            "error": None,
+        })
+    except Exception as exc:
+        print(
+            f"[ROW ERROR] {propid} image {index}/{total} | Asset_FileID={asset_fileid} | {exc}",
+            file=sys.stderr,
+        )
+        logger.log({
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "propid": propid,
+            "hotel_name": hotel_name,
+            "asset_fileid": asset_fileid,
+            "asset_index": row.get("Asset_Index", ""),
+            "asset_caption": row.get("Asset_Caption", ""),
+            "asset_link": row.get("Asset_Link", ""),
+            "step": "error",
+            "ai_amenity_category": None,
+            "ai_amenity_score": None,
+            "duration_ms": None,
+            "error": str(exc),
+        })
+        for col in AMENITY_COLUMNS:
+            enriched[col] = ""
+        enriched["Amenity_Category"] = ALTRO
+        for col in CONTENT_COLUMNS:
+            enriched[col] = ""
+        enriched["Check_Room"] = "0"
+
+    enriched = harmonize_row_schema(enriched)
+
+    if asset_fileid:
+        append_checkpoint(sidecar, asset_fileid, enriched, lock=checkpoint_lock)
+
+    if args.request_delay:
+        time.sleep(args.request_delay)
+
+    return enriched
+
+
 def process_hotel(
     propid: str,
     rows: List[Dict[str, str]],
@@ -690,43 +1239,36 @@ def process_hotel(
     model: str,
     taxonomy: List[Dict],
     logger: RunLogger,
-) -> None:
-    print(f"[START] {propid} | {hotel_name} | {len(rows)} images")
+) -> List[Dict[str, str]]:
+    from concurrent.futures import ThreadPoolExecutor
+
+    print(f"[START] {propid} | {hotel_name} | {len(rows)} images | workers={args.workers}")
     sidecar = sidecar_path(output_path)
     checkpoint = load_checkpoint(sidecar)
+    checkpoint_lock = threading.Lock()
+
+    to_process: List[Tuple[int, Dict[str, str]]] = []
+    cached: Dict[str, Dict] = {}
+    for index, row in enumerate(rows, start=1):
+        asset_fileid = row.get("Asset_FileID", "")
+        if asset_fileid and asset_fileid in checkpoint:
+            cached[asset_fileid] = harmonize_row_schema(checkpoint[asset_fileid])
+        else:
+            to_process.append((index, row))
+
+    total = len(rows)
 
     try:
         from tqdm import tqdm
-        iterator = tqdm(rows, desc=propid, unit="img")
+        progress = tqdm(total=total, desc=propid, unit="img")
+        progress.update(len(cached))
     except ImportError:
-        iterator = rows
+        progress = None
 
-    enriched_rows: List[Dict[str, str]] = []
-
-    for index, row in enumerate(iterator, start=1):
+    for row in rows:
         asset_fileid = row.get("Asset_FileID", "")
-        enriched = dict(row)
-
-        if asset_fileid and asset_fileid in checkpoint:
-            enriched_rows.append(checkpoint[asset_fileid])
-            continue
-
-        try:
-            ai_values = enrich_row(
-                row=row,
-                api_key=args.api_key,
-                model=model,
-                config=config,
-                taxonomy=taxonomy,
-                timeout=args.timeout,
-                max_retries=args.max_retries,
-            )
-            score = ai_values.pop("_classification_score", None)
-            classification_ms = ai_values.pop("_classification_ms", 0)
-            generation_ms = ai_values.pop("_generation_ms", 0)
-            enriched.update(ai_values)
-
-            logger.log({
+        if asset_fileid and asset_fileid in cached:
+            log_debug_event(logger, args.debug_log, {
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "propid": propid,
                 "hotel_name": hotel_name,
@@ -734,65 +1276,49 @@ def process_hotel(
                 "asset_index": row.get("Asset_Index", ""),
                 "asset_caption": row.get("Asset_Caption", ""),
                 "asset_link": row.get("Asset_Link", ""),
-                "step": "classification",
-                "ai_amenity_category": enriched.get("AI_Amenity_Category"),
-                "ai_amenity_score": score,
-                "duration_ms": classification_ms,
+                "step": "checkpoint_hit",
                 "error": None,
             })
-            logger.log({
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "propid": propid,
-                "hotel_name": hotel_name,
-                "asset_fileid": asset_fileid,
-                "asset_index": row.get("Asset_Index", ""),
-                "asset_caption": row.get("Asset_Caption", ""),
-                "asset_link": row.get("Asset_Link", ""),
-                "step": "generation",
-                "AI_Caption_Basic": enriched.get("AI_Caption_Basic"),
-                "AI_Description_Basic": enriched.get("AI_Description_Basic"),
-                "AI_Caption_Experience": enriched.get("AI_Caption_Experience"),
-                "AI_Description_Experience": enriched.get("AI_Description_Experience"),
-                "AI_Image_Tag": enriched.get("AI_Image_Tag"),
-                "AI_Alt_Text": enriched.get("AI_Alt_Text"),
-                "duration_ms": generation_ms,
-                "error": None,
-            })
-        except Exception as exc:
-            print(
-                f"[ROW ERROR] {propid} image {index}/{len(rows)} | Asset_FileID={asset_fileid} | {exc}",
-                file=sys.stderr,
-            )
-            logger.log({
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "propid": propid,
-                "hotel_name": hotel_name,
-                "asset_fileid": asset_fileid,
-                "asset_index": row.get("Asset_Index", ""),
-                "asset_caption": row.get("Asset_Caption", ""),
-                "asset_link": row.get("Asset_Link", ""),
-                "step": "error",
-                "ai_amenity_category": None,
-                "ai_amenity_score": None,
-                "duration_ms": None,
-                "error": str(exc),
-            })
-            for col in AMENITY_COLUMNS:
-                enriched[col] = ""
-            enriched["AI_Amenity_Category"] = ALTRO
-            for col in AI_COLUMNS:
-                enriched[col] = ""
 
-        enriched_rows.append(enriched)
-        if asset_fileid:
-            append_checkpoint(sidecar, asset_fileid, enriched)
+    def process_one(item: Tuple[int, Dict[str, str]]) -> Dict[str, str]:
+        idx, row = item
+        result = _process_single_image(
+            index=idx,
+            total=total,
+            row=row,
+            propid=propid,
+            hotel_name=hotel_name,
+            args=args,
+            config=config,
+            model=model,
+            taxonomy=taxonomy,
+            logger=logger,
+            sidecar=sidecar,
+            checkpoint_lock=checkpoint_lock,
+        )
+        if progress is not None:
+            progress.update(1)
+        return result
 
-        if args.request_delay:
-            time.sleep(args.request_delay)
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        processed_results = list(executor.map(process_one, to_process))
+
+    if progress is not None:
+        progress.close()
+
+    processed_iter = iter(processed_results)
+    enriched_rows: List[Dict[str, str]] = []
+    for row in rows:
+        asset_fileid = row.get("Asset_FileID", "")
+        if asset_fileid and asset_fileid in cached:
+            enriched_rows.append(cached[asset_fileid])
+        else:
+            enriched_rows.append(harmonize_row_schema(next(processed_iter)))
 
     write_hotel_csv(output_path, fieldnames, enriched_rows)
     sidecar.unlink(missing_ok=True)
     print(f"[DONE] {propid} | wrote {output_path}")
+    return enriched_rows
 
 
 def run_dry(
@@ -800,6 +1326,7 @@ def run_dry(
     groups: Dict[str, List[Dict]],
     hotel_names: Dict[str, str],
     prompts_config: Dict,
+    workers: int = 5,
 ) -> int:
     cost_per_call = prompts_config.get("cost_per_call_usd", 0.000125)
     total_images = 0
@@ -814,8 +1341,12 @@ def run_dry(
         print(f"{propid:<12} {hotel_names[propid][:50]:<50} {n:>8} {calls:>10} {cost:>12.4f}")
     total_calls = total_images * 2
     total_cost = total_calls * cost_per_call
+    seq_hours = (total_images * 12) / 3600
+    par_hours = (total_images * 12) / (3600 * workers)
     print("-" * 96)
-    print(f"{'TOTAL':<12} {'':<50} {total_images:>8} {total_calls:>10} {total_cost:>12.4f}\n")
+    print(f"{'TOTAL':<12} {'':<50} {total_images:>8} {total_calls:>10} {total_cost:>12.4f}")
+    print(f"\nEstimated time (sequential):        {seq_hours:.1f} hours")
+    print(f"Estimated time ({workers} workers): {par_hours:.1f} hours\n")
     return 0
 
 
@@ -832,21 +1363,28 @@ def main() -> int:
     groups, hotel_names, name_to_propids = build_indexes(rows)
     selected_propids = resolve_hotels(args, groups, hotel_names, name_to_propids, output_dir)
     output_fieldnames = original_fieldnames + [
-        col for col in AMENITY_COLUMNS + AI_COLUMNS
+        col for col in AMENITY_COLUMNS + CONTENT_COLUMNS
         if col not in original_fieldnames
     ]
     if args.dry_run:
-        return run_dry(selected_propids, groups, hotel_names, prompts_config)
+        return run_dry(selected_propids, groups, hotel_names, prompts_config, workers=args.workers)
 
     logger = RunLogger(Path(args.log_dir))
+    print(f"[LOG] Detailed run log: {logger.path}")
     try:
         for propid in selected_propids:
             hotel_name = hotel_names[propid]
             output_path = expected_output_path(output_dir, propid, hotel_name)
             if output_path.exists() and not args.force:
                 print(f"[SKIP] {propid} | {hotel_name} | output exists: {output_path}")
+                update_cumulative_csv(
+                    cumulative_output_path(output_dir),
+                    output_fieldnames,
+                    propid,
+                    read_output_csv(output_path),
+                )
                 continue
-            process_hotel(
+            enriched_rows = process_hotel(
                 propid=propid,
                 rows=groups[propid],
                 hotel_name=hotel_name,
@@ -857,6 +1395,12 @@ def main() -> int:
                 model=model,
                 taxonomy=taxonomy,
                 logger=logger,
+            )
+            update_cumulative_csv(
+                cumulative_output_path(output_dir),
+                output_fieldnames,
+                propid,
+                enriched_rows,
             )
     finally:
         logger.close()

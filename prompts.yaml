@@ -3,6 +3,7 @@ tone_of_voice: "Premium hospitality editorial, clear, elegant, natural, and grou
 generation:
   temperature: 0.3
   max_output_tokens: 500
+  thinking_budget: 0
 length_limits:
   caption_max_words: 14
   description_max_words: 36
@@ -20,6 +21,7 @@ style_rules:
 classification:
   temperature: 0.1
   max_output_tokens: 100
+  thinking_budget: 0
 cost_per_call_usd: 0.000125
 amenity_taxonomy:
   - category: "Spa / Wellness Center"
