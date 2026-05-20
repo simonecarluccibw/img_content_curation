@@ -35,15 +35,15 @@ AMENITY_COLUMNS = [
     "Amenity_CustomTags",
 ]
 CONTENT_COLUMNS = [
-    "Caption_Basic",
-    "Description_Basic",
+    #"Caption_Basic",
+    #"Description_Basic",
     "Caption_Experience",
     "Description_Experience",
     "Alt_Text",
     "Check_Room",
 ]
 CLASSIFICATION_SCORE_THRESHOLD = 0.4
-ALTRO = "Altro"
+OTHER = "Other"
 CLASSIFICATION_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -446,8 +446,8 @@ def harmonize_row_schema(row: Dict[str, str]) -> Dict[str, str]:
     normalized["Amenity_CustomTag4"] = normalized.get("Amenity_CustomTag4") or normalized.get(
         "AI_Amenity_CustomTag4", ""
     )
-    normalized["Caption_Basic"] = normalized.get("Caption_Basic") or normalized.get("AI_Caption_Basic", "")
-    normalized["Description_Basic"] = normalized.get("Description_Basic") or normalized.get("AI_Description_Basic", "")
+    #normalized["Caption_Basic"] = normalized.get("Caption_Basic") or normalized.get("AI_Caption_Basic", "")
+    #normalized["Description_Basic"] = normalized.get("Description_Basic") or normalized.get("AI_Description_Basic", "")
     normalized["Caption_Experience"] = normalized.get("Caption_Experience") or normalized.get(
         "AI_Caption_Experience", ""
     )
@@ -481,8 +481,8 @@ def build_prompt(row: Dict[str, str], config: Dict) -> str:
     return (
         "You are generating hotel image metadata in English for hospitality distribution.\n"
         f"Tone of voice: {tone}\n"
-        f"Basic caption style: {style.get('basic_caption', '')}\n"
-        f"Basic description style: {style.get('basic_description', '')}\n"
+        #f"Basic caption style: {style.get('basic_caption', '')}\n"
+        #f"Basic description style: {style.get('basic_description', '')}\n"
         f"Experience caption style: {style.get('experience_caption', '')}\n"
         f"Experience description style: {style.get('experience_description', '')}\n"
         f"Alt text style: {style.get('alt_text', '')}\n"
@@ -499,7 +499,8 @@ def build_prompt(row: Dict[str, str], config: Dict) -> str:
         "- Set Check_Room to 0 for all other hotel scenes.\n"
         "- Return valid JSON only.\n"
         "Return an object with exactly these keys:\n"
-        'Caption_Basic, Description_Basic, Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n'
+        #'Caption_Basic, Description_Basic, Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n'
+        'Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n'
         "Image context:\n"
         + "\n".join(context_lines)
     )
@@ -521,14 +522,14 @@ def build_classification_prompt(row: Dict[str, str], taxonomy: List[Dict]) -> st
         "- Assign the single most appropriate category based on what is visually dominant in the image.\n"
         "- The caption is a hint, not ground truth - trust the image first.\n"
         "- A guest room or a private bathroom is not an amenity category unless another listed amenity is visually dominant.\n"
-        f"- If no category fits with confidence >= {CLASSIFICATION_SCORE_THRESHOLD}, return Altro.\n"
+        f"- If no category fits with confidence >= {CLASSIFICATION_SCORE_THRESHOLD}, return Other.\n"
         "- Return valid JSON only, no explanation, no markdown.\n"
-        'Return exactly: {"category": "<category name or Altro>", "score": <float 0.0-1.0>}'
+        'Return exactly: {"category": "<category name or Other>", "score": <float 0.0-1.0>}'
     )
 
 
 def build_classification_fallback_prompt(row: Dict[str, str], taxonomy: List[Dict]) -> str:
-    categories = ", ".join([entry["category"] for entry in taxonomy] + [ALTRO])
+    categories = ", ".join([entry["category"] for entry in taxonomy] + [OTHER])
     return (
         "Classify this hotel image into exactly one category.\n"
         f"Allowed categories: {categories}\n"
@@ -538,8 +539,8 @@ def build_classification_fallback_prompt(row: Dict[str, str], taxonomy: List[Dic
         "<category>|||<score>\n"
         "Rules:\n"
         "- Score must be a decimal between 0.0 and 1.0.\n"
-        "- A guest room or a private bathroom alone should map to Altro.\n"
-        f"- If uncertain below {CLASSIFICATION_SCORE_THRESHOLD}, output Altro.\n"
+        "- A guest room or a private bathroom alone should map to Other.\n"
+        f"- If uncertain below {CLASSIFICATION_SCORE_THRESHOLD}, output Other.\n"
         "- Do not add any extra words."
     )
 
@@ -551,15 +552,15 @@ def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, 
 
     try:
         parsed = json.loads(extract_first_json_object(text))
-        category = str(parsed.get("category", ALTRO)).strip()
+        category = str(parsed.get("category", OTHER)).strip()
         score = float(parsed.get("score", 0.0))
-        return {"category": category or ALTRO, "score": score}
+        return {"category": category or OTHER, "score": score}
     except (ValueError, json.JSONDecodeError, RuntimeError):
         pass
 
     if "|||" in text:
         category_part, score_part = text.split("|||", 1)
-        category = category_part.strip() or ALTRO
+        category = category_part.strip() or OTHER
         try:
             score = float(score_part.strip())
         except ValueError:
@@ -572,8 +573,8 @@ def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, 
         if entry["category"].casefold() in lowered:
             matched_category = entry["category"]
             break
-    if matched_category is None and ALTRO.casefold() in lowered:
-        matched_category = ALTRO
+    if matched_category is None and OTHER.casefold() in lowered:
+        matched_category = OTHER
 
     score_match = re.search(r"([01](?:\.\d+)?)", text)
     score = float(score_match.group(1)) if score_match else 0.0
@@ -852,8 +853,8 @@ def call_gemini(
                     })
                     raise
                 return {
-                    "Caption_Basic": str(parsed.get("Caption_Basic", "")).strip(),
-                    "Description_Basic": str(parsed.get("Description_Basic", "")).strip(),
+                    #"Caption_Basic": str(parsed.get("Caption_Basic", "")).strip(),
+                    #"Description_Basic": str(parsed.get("Description_Basic", "")).strip(),
                     "Caption_Experience": str(parsed.get("Caption_Experience", "")).strip(),
                     "Description_Experience": str(parsed.get("Description_Experience", "")).strip(),
                     "Alt_Text": str(parsed.get("Alt_Text", "")).strip(),
@@ -912,8 +913,8 @@ def resolve_amenity_fields(
     taxonomy: List[Dict],
 ) -> Dict[str, str]:
     empty = {col: "" for col in AMENITY_COLUMNS}
-    if score < CLASSIFICATION_SCORE_THRESHOLD or category == ALTRO:
-        empty["Amenity_Category"] = ALTRO
+    if score < CLASSIFICATION_SCORE_THRESHOLD or category == OTHER:
+        empty["Amenity_Category"] = OTHER
         return empty
     for entry in taxonomy:
         if entry["category"] == category:
@@ -932,7 +933,7 @@ def resolve_amenity_fields(
                     entry["custom_tag_4"],
                 ]),
             }
-    empty["Amenity_Category"] = ALTRO
+    empty["Amenity_Category"] = OTHER
     return empty
 
 
@@ -979,10 +980,10 @@ def enrich_row(
         )
     except Exception as exc:
         classification_error = str(exc)
-        classification_result = {"category": ALTRO, "score": 0.0}
+        classification_result = {"category": OTHER, "score": 0.0}
         log_debug_event(logger, True, {
             **log_context,
-            "step": "classification_fallback_altro",
+            "step": "classification_fallback_other",
             "attempt": None,
             "duration_ms": None,
             "error": classification_error,
@@ -1175,8 +1176,8 @@ def _process_single_image(
             "asset_caption": row.get("Asset_Caption", ""),
             "asset_link": row.get("Asset_Link", ""),
             "step": "generation",
-            "Caption_Basic": enriched.get("Caption_Basic"),
-            "Description_Basic": enriched.get("Description_Basic"),
+            #"Caption_Basic": enriched.get("Caption_Basic"),
+            #"Description_Basic": enriched.get("Description_Basic"),
             "Caption_Experience": enriched.get("Caption_Experience"),
             "Description_Experience": enriched.get("Description_Experience"),
             "Alt_Text": enriched.get("Alt_Text"),
@@ -1212,7 +1213,7 @@ def _process_single_image(
         })
         for col in AMENITY_COLUMNS:
             enriched[col] = ""
-        enriched["Amenity_Category"] = ALTRO
+        enriched["Amenity_Category"] = OTHER
         for col in CONTENT_COLUMNS:
             enriched[col] = ""
         enriched["Check_Room"] = "0"
@@ -1328,23 +1329,28 @@ def run_dry(
     prompts_config: Dict,
     workers: int = 5,
 ) -> int:
-    cost_per_call = prompts_config.get("cost_per_call_usd", 0.000125)
+    cost_section = prompts_config.get("cost", {})
+    class_cost = cost_section.get("classification_per_call_usd", 0.00056)
+    gen_cost = cost_section.get("generation_per_call_usd", 0.00076)
+    per_image = class_cost + gen_cost
+
     total_images = 0
     print("\n[DRY RUN] Estimate summary:")
+    print(f"Model: {prompts_config.get('model', 'unknown')}")
+    print(f"Per-image cost: ${per_image:.6f} (class ${class_cost:.6f} + gen ${gen_cost:.6f})")
     print(f"{'Propid':<12} {'Hotel':<50} {'Images':>8} {'API calls':>10} {'Est. cost $':>12}")
     print("-" * 96)
     for propid in selected_propids:
         n = len(groups[propid])
-        calls = n * 2
-        cost = calls * cost_per_call
+        cost = n * per_image
         total_images += n
-        print(f"{propid:<12} {hotel_names[propid][:50]:<50} {n:>8} {calls:>10} {cost:>12.4f}")
-    total_calls = total_images * 2
-    total_cost = total_calls * cost_per_call
+        print(f"{propid:<12} {hotel_names[propid][:50]:<50} {n:>8} {n*2:>10} {cost:>12.4f}")
+
+    total_cost = total_images * per_image
     seq_hours = (total_images * 12) / 3600
     par_hours = (total_images * 12) / (3600 * workers)
     print("-" * 96)
-    print(f"{'TOTAL':<12} {'':<50} {total_images:>8} {total_calls:>10} {total_cost:>12.4f}")
+    print(f"{'TOTAL':<12} {'':<50} {total_images:>8} {total_images*2:>10} {total_cost:>12.4f}")
     print(f"\nEstimated time (sequential):        {seq_hours:.1f} hours")
     print(f"Estimated time ({workers} workers): {par_hours:.1f} hours\n")
     return 0

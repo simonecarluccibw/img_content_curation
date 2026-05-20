@@ -52,43 +52,43 @@ Then put your real key inside `.env`. The CLI automatically loads `.env` from th
 Single hotel by `Propid`:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --propid 77519
+python pipeline.py --input "data.csv" --propid 77519
 ```
 
 More than one hotel by `Propid`:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --propid 77519,98373
+python pipeline.py --input "data.csv" --propid 77519,98373
 ```
 
 Hotel by exact name:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --hotel-name "Zante Park Resort & Spa, BEST WESTERN Premier Collection"
+python pipeline.py --input "data.csv" --hotel-name "Zante Park Resort & Spa, BEST WESTERN Premier Collection"
 ```
 
 More than one hotel name:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --hotel-name "Zante Park Resort & Spa, BEST WESTERN Premier Collection" --hotel-name "BEST WESTERN Hotel Adige"
+python pipeline.py --input "data.csv" --hotel-name "Zante Park Resort & Spa, BEST WESTERN Premier Collection" --hotel-name "BEST WESTERN Hotel Adige"
 ```
 
 Next unprocessed hotels:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --next-hotels 3
+python pipeline.py --input "data.csv" --next-hotels 3
 ```
 
 Force regeneration:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --propid 77519 --force
+python pipeline.py --input "data.csv" --propid 77519 --force
 ```
 
 Custom output directory and prompts file:
 
 ```bash
-python pipeline.py --input "Download_ICEPortal_ID img(Sheet1).csv" --output-dir output_hotels --prompts prompts.yaml --propid 77519
+python pipeline.py --input "data.csv" --output-dir output_hotels --prompts prompts.yaml --propid 77519
 ```
 
 ## Output
@@ -101,7 +101,7 @@ The script writes one file per hotel in `output_hotels/` using this pattern:
 
 Each output CSV keeps all original columns and appends:
 
-- `Amenity_Category`   (`Altro` if no category exceeds score 0.4)
+- `Amenity_Category`   (`Other` if no category exceeds score 0.4)
 - `Amenity_Codes`
 - `Amenity_MaxCategory`
 - `Amenity_CustomTag1`
@@ -109,8 +109,6 @@ Each output CSV keeps all original columns and appends:
 - `Amenity_CustomTag3`
 - `Amenity_CustomTag4`
 - `Amenity_CustomTags` (comma-separated union of the four custom tag columns)
-- `Caption_Basic`
-- `Description_Basic`
 - `Caption_Experience`
 - `Description_Experience`
 - `Alt_Text`

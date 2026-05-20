@@ -1,31 +1,90 @@
-model: gemini-2.5-flash
-tone_of_voice: "Premium hospitality editorial, clear, elegant, natural, and grounded in what is visible."
+model: gemini-3.1-flash-lite
+#old model: gemini-2.5-flash
+#old model: 
+#old tone_of_voice: "Premium hospitality editorial, clear, elegant, natural, and grounded in what is visible."
+tone_of_voice: |
+  You are a hotel copywriter writing in English guest facing hotel experience content for a hotel brand website.
+
+  Brand voice is warm, welcoming, witty, wise.
+  Style is invitational and quietly confident.
+  The writing must feel refined, human, and emotionally intelligent.
+
+  Avoid clichés and hype.
+  Avoid slang and region specific idioms.
+  Avoid sarcasm and jokes.
+  Avoid hyphens and dashes.
+  All character limits include spaces.
+
+  Write with a sense of place, but do not over explain the destination.
+  Focus on how the experience feels, not only what it includes.
+  Use sensory detail sparingly and precisely.
+  Keep the tone elegant, fresh, and easy to read.
+
+  Do not use exaggerated luxury language such as unforgettable, world class, iconic, ultimate, hidden gem, paradise, or once in a lifetime.
+  Do not use generic phrases such as something for everyone, nestled in, escape the ordinary, indulge in, or make memories.
+  Do not overuse adjectives.
+  Do not sound sales driven.
+
+  Prioritise clarity, rhythm, and emotional appeal.
+  Every line should feel useful, considered, and guest facing.
+  Use active voice where possible.
+  Vary sentence length naturally.
+  Make the copy feel polished but never stiff.
+
+  When rewriting, preserve the factual meaning.
+  When creating new copy, do not invent amenities, services, locations, awards, or details not provided.
+  If information is missing, write around it gracefully rather than adding assumptions.
+
+  Output only the requested copy unless asked to explain choices.
+
 generation:
-  temperature: 0.3
+  temperature: 0.8
   max_output_tokens: 500
   thinking_budget: 0
 length_limits:
   caption_max_words: 14
   description_max_words: 36
   alt_text_max_words: 18
-tag_values:
-  - tag-mare
-  - tag-montagna
-  - tag-citta
 style_rules:
-  basic_caption: "Write a short, factual image caption in polished hotel English."
-  basic_description: "Write a compact descriptive sentence focused on visible details and setting."
-  experience_caption: "Write a short, evocative caption that suggests guest experience without exaggeration."
-  experience_description: "Write a richer but still concise hospitality description inspired by the atmosphere of the image."
+  #basic_caption: "Write a short, factual image caption in polished hotel English."
+  #basic_description: "Write a compact descriptive sentence focused on visible details and setting."
+  #experience_caption: "Write a short, evocative caption that suggests guest experience without exaggeration."
+  #experience_description: "Write a richer but still concise hospitality description inspired by the atmosphere of the image."
+
+  experience_caption: |
+   Write a very concise English caption for a guest facing hotel brand website, inspired by the image provided.
+   The caption should elevate the experience shown in the image without describing it too literally.
+   Tone of voice: warm, welcoming, witty, wise.
+   Style: invitational, quietly confident, refined, human, emotionally intelligent.
+   Keep it short, elegant, and evocative.
+   Avoid clichés, hype, slang, sarcasm, jokes, hyphens, dashes, and region specific idioms.
+   Do not invent details not visible or provided.
+   Do not mention specific categories of experience unless clearly requested.
+   Output only the caption
+   Maximum 50 characters including spaces.
+  experience_description: |
+   Write a concise English description for a guest facing hotel brand website, inspired by the image provided.
+
+   The description should bring out the feeling of the experience, not simply list what is shown.
+   Tone of voice: warm, welcoming, witty, wise.
+   Style: invitational, quietly confident, refined, human, emotionally intelligent.
+
+   Use clear, polished language with gentle sensory detail.
+   Keep it brief and emotionally engaging.
+   Avoid clichés, hype, slang, sarcasm, jokes, hyphens, dashes, and region specific idioms.
+   Do not invent amenities, services, locations, or details not visible or provided.
+   Do not mention specific categories of experience unless clearly requested.
+   Output only the description.
+   Maximum 100 characters including spaces.
   alt_text: "Write concise, accessible alt text that describes the image plainly and avoids marketing language."
 classification:
   temperature: 0.1
-  max_output_tokens: 100
+  max_output_tokens: 200
   thinking_budget: 0
 cost_per_call_usd: 0.000125
 amenity_taxonomy:
   - category: "Spa / Wellness Center"
-    keywords: "Centro Spa, massaggi, centro benessere"
+    keywords: "spa, wellness center, wellness area, massage, massage room, treatment room, sauna, steam room, relaxation area, spa pool"
     codes: "12"
     maxcategoria: "Spa"
     custom_tag_1: "overview-spa"
@@ -33,7 +92,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-spa-1"
     custom_tag_4: ""
   - category: "Yoga Studio"
-    keywords: "sessioni di yoga"
+    keywords: "yoga, yoga studio, yoga class, yoga session, yoga mat, meditation, stretching, wellness class, fitness studio"
     codes: "12"
     maxcategoria: "Spa"
     custom_tag_1: "overview-spa"
@@ -41,7 +100,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-spa-2"
     custom_tag_4: "spa-yoga"
   - category: "Bistro /Dining"
-    keywords: "aperitivo o altro da mangiare e bere nella spa"
+    keywords: "spa dining, spa bistro, wellness bistro, aperitif, light bites, healthy food, drinks, herbal tea, relaxation area, wellness refreshments"
     codes: "13"
     maxcategoria: "Spa"
     custom_tag_1: "overview-spa"
@@ -49,7 +108,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-spa-3"
     custom_tag_4: ""
   - category: "Relaxtion Lounge"
-    keywords: "lounge relax"
+    keywords: "relaxation lounge, relax lounge, quiet lounge, relaxation area, calm seating, comfortable seating, spa lounge, wellness lounge, resting area, peaceful atmosphere"
     codes: "14"
     maxcategoria: "Spa"
     custom_tag_1: "overview-spa"
@@ -57,7 +116,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-spa-4"
     custom_tag_4: ""
   - category: "Pool"
-    keywords: "Piscina"
+    keywords: "pool"
     codes: "3, 30, 31"
     maxcategoria: "Pool"
     custom_tag_1: "overview-pool"
@@ -81,7 +140,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-golf-nearby"
     custom_tag_4: ""
   - category: "Fitness Center"
-    keywords: "Palestra, centro fitness"
+    keywords: "Gym, fitness center"
     codes: "5"
     maxcategoria: "Health club / fitness center / gym"
     custom_tag_1: "overview-fitness-center"
@@ -89,7 +148,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Game Room / Arcade"
-    keywords: "Sala Giochi, playstation, xbox"
+    keywords: "Arcade, PlayStation, Xbox, Game Room"
     codes: "22"
     maxcategoria: "Property amenity"
     custom_tag_1: "overview-game-room"
@@ -105,7 +164,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Complimentary Breakfast"
-    keywords: "Colazione"
+    keywords: "Breakfast"
     codes: "28"
     maxcategoria: "Breakfast Area"
     custom_tag_1: "overview-breakfast"
@@ -113,7 +172,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Beach Access"
-    keywords: "spiaggia, mare"
+    keywords: "beach, sea"
     codes: "11"
     maxcategoria: "Beach"
     custom_tag_1: "overview-beach-access"
@@ -121,7 +180,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Dining (on-site)"
-    keywords: "ristorante, cena, pranzo"
+    keywords: "restaurant, dinner, lunch"
     codes: "4"
     maxcategoria: "Restaurant"
     custom_tag_1: ""
@@ -129,7 +188,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Lazy River / Waterpark / Splashpad"
-    keywords: "acqua park, scivoli d'acqua, parco acquatico"
+    keywords: "water park, water slides, water park"
     codes: "3,30,31"
     maxcategoria: "Pool"
     custom_tag_1: ""
@@ -137,7 +196,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Kid Zone (outdoor play area)"
-    keywords: "ludoteca, gioco bambini, parco per bambini senza acqua"
+    keywords: "playroom, children's play area, children's park without water"
     codes: "22"
     maxcategoria: "Property amenity"
     custom_tag_1: ""
@@ -153,7 +212,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-picnic"
     custom_tag_4: ""
   - category: "Hiking/Biking Trails (on-property - adjacent to)"
-    keywords: "bici"
+    keywords: "bike, biking, bicycle, cycling, bike trail, biking trail, mountain bike, bike path, outdoor trail, nature trail"
     codes: "22"
     maxcategoria: "Property amenity"
     custom_tag_1: ""
@@ -169,7 +228,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-gardens"
     custom_tag_4: ""
   - category: "Winter Sport (ski/snowmobile) Nearby (10 miles)"
-    keywords: "sport invernali, scii, snowboard"
+    keywords: "winter sports, skiing, snowboarding"
     codes: "34"
     maxcategoria: "Local attraction"
     custom_tag_1: ""
@@ -177,7 +236,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-winter"
     custom_tag_4: ""
   - category: "Fishing (on-property)"
-    keywords: "canna da pesca, posto per pescare pesci"
+    keywords: "fishing rod, place to catch fish"
     codes: "22"
     maxcategoria: "Property amenity"
     custom_tag_1: ""
@@ -185,7 +244,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-fish"
     custom_tag_4: ""
   - category: "Rooftop dining / bar"
-    keywords: "foto di bar/lounge/restaurant su rooftop/terrazzi"
+    keywords: "rooftop, rooftop terrace, rooftop bar, roof bar, sky bar, terrace bar, rooftop dining, rooftop restaurant, rooftop lounge, rooftop pool bar, panoramic bar, panoramic terrace, city view bar, skyline view, skyline bar"
     codes: "4"
     maxcategoria: "Restaurant"
     custom_tag_1: "dining-lounge"
@@ -193,7 +252,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-rooftop-experience"
     custom_tag_4: ""
   - category: "Feature Restaurant"
-    keywords: "foto di cene, pranzi, chiacchere o bicchieri su rooftop"
+    keywords: "dinner, lunch, dining, restaurant, featured restaurant, signature restaurant, à la carte restaurant, fine dining, casual dining, food, dishes, plates, table setting, restaurant table, people dining, guests dining, meal"
     codes: "4"
     maxcategoria: "Restaurant"
     custom_tag_1: "dining-fine-dining"
@@ -201,7 +260,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Lounge"
-    keywords: "foto di lounge bar"
+    keywords: "lounge, lounge bar, hotel lounge, lobby lounge, cocktail lounge, bar lounge, seating area, sofas, armchairs, guests relaxing"
     codes: "13"
     maxcategoria: "Bar/Lounge"
     custom_tag_1: "dining-lounge"
@@ -209,7 +268,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Bar/Pub"
-    keywords: "foto di bar/pub"
+    keywords: "bar, pub, hotel bar, cocktail bar, drinks, cocktails, beer, wine glasses, bar counter, bartender"
     codes: "13"
     maxcategoria: "Bar/Lounge"
     custom_tag_1: "dining-bar-pub"
@@ -217,7 +276,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Live entertainment"
-    keywords: "intrattenimento dal vivo, cantanti, gente col microfono"
+    keywords: "live entertainment, live music, singer, singers, musician, band, microphone, performance, stage, guests watching, show"
     codes: "22"
     maxcategoria: "Property amenity"
     custom_tag_1: ""
@@ -225,7 +284,7 @@ amenity_taxonomy:
     custom_tag_3: "experience-live-entertainment"
     custom_tag_4: ""
   - category: "Meetings"
-    keywords: "Riunioni di lavoro"
+    keywords: "meeting, business meeting, conference room, meeting room, boardroom, corporate event, presentation, seminar, workshop, training session"
     codes: "8"
     maxcategoria: "Meeting room"
     custom_tag_1: "meeting-meeting-room"
@@ -233,7 +292,7 @@ amenity_taxonomy:
     custom_tag_3: ""
     custom_tag_4: ""
   - category: "Weddings"
-    keywords: "Matrimoni in hotel"
+    keywords: "wedding, hotel wedding, wedding ceremony, wedding reception, bride, groom, wedding guests, wedding table"
     codes: "32"
     maxcategoria: "Wedding"
     custom_tag_1: "meeting-wedding"
