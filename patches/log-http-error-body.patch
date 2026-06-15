@@ -1,0 +1,147 @@
+diff --git a/pipeline.py b/pipeline.py
+--- a/pipeline.py
++++ b/pipeline.py
+@@
+ def summarize_api_response(api_response: Dict, limit: int = 1200) -> str:
+     try:
+         serialized = json.dumps(api_response, ensure_ascii=False)
+     except Exception:
+         serialized = str(api_response)
+     return shorten_text(serialized, limit=limit)
+ 
+ 
++def read_http_error_body(exc: urllib.error.HTTPError, limit: int = 2000) -> str:
++    try:
++        body = exc.read()
++    except Exception:
++        return ""
++    if isinstance(body, bytes):
++        text = body.decode("utf-8", errors="replace")
++    else:
++        text = str(body)
++    return shorten_text(text, limit=limit)
++
++
++def format_http_error(exc: urllib.error.HTTPError, body: str) -> str:
++    detail = f"HTTP Error {exc.code}: {exc.reason}"
++    if body:
++        return f"{detail} | response body: {body}"
++    return detail
++
++
+ def build_thinking_config(section: Dict) -> Dict:
+     budget = section.get("thinking_budget", 0)
+     return {"thinkingBudget": budget}
+@@
+-        except urllib.error.HTTPError as exc:
+-            last_error = exc
++        except urllib.error.HTTPError as exc:
++            error_body = read_http_error_body(exc)
++            last_error = format_http_error(exc, error_body)
+             if exc.code == 429:
+                 retry_after = exc.headers.get("Retry-After")
+                 wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+                 log_debug_event(logger, debug_log, {
+                     **log_context,
+@@
+                     "http_status": exc.code,
+                     "retry_after": retry_after,
+                     "wait_seconds": wait,
+-                    "error": str(exc),
++                    "error": last_error,
++                    "http_error_body": error_body,
+                 })
+                 time.sleep(wait)
+                 continue
+-            if attempt == max_retries:
+-                break
+             log_debug_event(logger, debug_log, {
+                 **log_context,
+                 "step": "classification_retry",
+                 "attempt": attempt,
+                 "http_status": exc.code,
+                 "retry_after": None,
+                 "wait_seconds": min(2.0 ** attempt, 60) + random.uniform(0, 1),
+-                "error": str(exc),
++                "error": last_error,
++                "http_error_body": error_body,
+             })
++            if attempt == max_retries:
++                break
+             time.sleep(min(2.0 ** attempt, 60) + random.uniform(0, 1))
+@@
+-        except urllib.error.HTTPError as exc:
+-            fallback_error = exc
++        except urllib.error.HTTPError as exc:
++            error_body = read_http_error_body(exc)
++            fallback_error = format_http_error(exc, error_body)
+             if exc.code == 429:
+                 retry_after = exc.headers.get("Retry-After")
+                 wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+                 log_debug_event(logger, debug_log, {
+                     **log_context,
+@@
+                     "http_status": exc.code,
+                     "retry_after": retry_after,
+                     "wait_seconds": wait,
+-                    "error": str(exc),
++                    "error": fallback_error,
++                    "http_error_body": error_body,
+                 })
+                 time.sleep(wait)
+                 continue
+-            if attempt == max_retries:
+-                break
+             wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+             log_debug_event(logger, debug_log, {
+                 **log_context,
+                 "step": "classification_fallback_retry",
+@@
+                 "http_status": exc.code,
+                 "retry_after": None,
+                 "wait_seconds": wait,
+-                "error": str(exc),
++                "error": fallback_error,
++                "http_error_body": error_body,
+             })
++            if attempt == max_retries:
++                break
+             time.sleep(wait)
+@@
+-        except urllib.error.HTTPError as exc:
+-            last_error = exc
++        except urllib.error.HTTPError as exc:
++            error_body = read_http_error_body(exc)
++            last_error = format_http_error(exc, error_body)
+             if exc.code == 429:
+                 retry_after = exc.headers.get("Retry-After")
+                 wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+                 log_debug_event(logger, debug_log, {
+                     **log_context,
+@@
+                     "http_status": exc.code,
+                     "retry_after": retry_after,
+                     "wait_seconds": wait,
+-                    "error": str(exc),
++                    "error": last_error,
++                    "http_error_body": error_body,
+                 })
+                 time.sleep(wait)
+                 continue
+-            if attempt == max_retries:
+-                break
+             wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+             log_debug_event(logger, debug_log, {
+                 **log_context,
+                 "step": "generation_retry",
+@@
+                 "http_status": exc.code,
+                 "retry_after": None,
+                 "wait_seconds": wait,
+-                "error": str(exc),
++                "error": last_error,
++                "http_error_body": error_body,
+             })
++            if attempt == max_retries:
++                break
+             time.sleep(wait)
