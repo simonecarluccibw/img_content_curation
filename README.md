@@ -51,3 +51,32 @@ con delimitatore `;`, tutte le colonne originali + colonne AI:
 - `AI_Description_Experience`
 - `AI_Image_Tag`
 - `AI_Alt_Text`
+
+## Export Excel
+
+Dopo aver generato o aggiornato il CSV cumulativo della pipeline completa, esporta il file Excel finale con:
+
+```bash
+python export_content_excel.py \
+  --input output_hotels/all_hotels_cumulative.csv \
+  --output output_hotels/content_export.xlsx
+```
+
+Il file Excel contiene queste colonne, in questo ordine:
+
+`IceID`, `MappedID`, `Hotel`, `AssetType`, `Index`, `PublicID`, `Category`, `Custom Tags`, `Caption`, `Description`, `Alt Text`, `URL`.
+
+Mappatura applicata rispetto al CSV esportato:
+
+- `IceID` <- `Listing_ICEID`
+- `MappedID` <- `Listing_MappedID`
+- `Hotel` <- concatenazione di `Listing_Brand` e `Listing_Name`
+- `AssetType` <- `PH` per tutte le righe
+- `Index` <- `Asset_Index`
+- `PublicID` <- `Asset_PublicID`
+- `Category` <- `Amenity_Category`
+- `Custom Tags` <- `Amenity_CustomTags`
+- `Caption` <- `Caption`
+- `Description` <- `Description`
+- `Alt Text` <- `Alt_Text`
+- `URL` <- `Asset_Link`
