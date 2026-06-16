@@ -817,7 +817,7 @@ def call_gemini(
         ],
         "generationConfig": {
             "temperature": config.get("generation", {}).get("temperature", 0.3),
-            "maxOutputTokens": config.get("generation", {}).get("max_output_tokens", 500),
+            "maxOutputTokens": config.get("generation", {}).get("max_output_tokens", 5000),
             "responseMimeType": "application/json",
             "thinkingConfig": build_thinking_config(config.get("generation", {})),
         },
@@ -1362,7 +1362,7 @@ def main() -> int:
     prompts_path = Path(args.prompts)
     output_dir = Path(args.output_dir)
     prompts_config = load_prompts(prompts_path)
-    model = args.model or prompts_config.get("model", "gemini-2.5-flash")
+    model = args.model or prompts_config.get("model", "gemini-3.5-flash")
     taxonomy = prompts_config.get("amenity_taxonomy", [])
 
     rows, original_fieldnames = read_rows(input_path)
