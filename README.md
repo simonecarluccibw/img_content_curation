@@ -4,7 +4,7 @@ Pipeline CLI per arricchire immagini hotel da un CSV ICEPortal e preparare un ex
 
 Il progetto usa una sola pipeline principale:
 
-- `pipeline.py` legge il CSV sorgente, processa le immagini per hotel con Gemini Vision e produce CSV arricchiti.
+- `pipeline.py` legge il CSV sorgente, processa le immagini per hotel e produce CSV arricchiti.
 - `export_content_excel.py` converte il cumulativo della pipeline in `content_export.xlsx` con le colonne finali richieste.
 
 Non serve `pipeline_hotels.py`: tutta la logica di selezione hotel, resume, output per hotel e cumulativo e' dentro `pipeline.py`.
@@ -15,9 +15,10 @@ Non serve `pipeline_hotels.py`: tutta la logica di selezione hotel, resume, outp
 .
 |-- pipeline.py                 # Pipeline principale per classificazione e generazione contenuti
 |-- export_content_excel.py     # Export Excel finale da all_hotels_cumulative.csv
-|-- prompts.yaml                # Prompt, modello, tone of voice, taxonomy e stime costo
+|-- prompts.yaml                # Modelli, prompt, provider copy, tone of voice e taxonomy
 |-- requirements.txt            # Dipendenze Python minime
 |-- test_export_content_excel.py # Test unitari per export Excel
+|-- test_pipeline_content_generation.py # Test provider copy vision
 |-- .env.example                # Template variabili ambiente
 `-- .devcontainer/              # Setup GitHub Codespaces
 ```
@@ -28,8 +29,9 @@ Non serve `pipeline_hotels.py`: tutta la logica di selezione hotel, resume, outp
 
 1. Apri il repository in Codespaces.
 2. Aggiungi un secret Codespaces chiamato `GEMINI_API_KEY`.
-3. Carica il CSV sorgente nel workspace.
-4. Esegui la pipeline dal terminale.
+3. Se usi OpenRouter per i copy, aggiungi anche `OPENROUTER_API_KEY`.
+4. Carica il CSV sorgente nel workspace.
+5. Esegui la pipeline dal terminale.
 
 Il dev container installa Python 3.11 e le dipendenze in `requirements.txt`.
 
@@ -40,13 +42,45 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Poi inserisci la chiave reale in `.env`:
+Poi inserisci le chiavi reali in `.env`:
 
 ```text
 GEMINI_API_KEY=...
+OPENROUTER_API_KEY=...
 ```
 
-`pipeline.py` carica automaticamente `.env` dalla root del progetto.
+`GEMINI_API_KEY` serve sempre per la classificazione amenity. `OPENROUTER_API_KEY` serve solo quando `content_generation.provider` e' `openrouter`.
+
+## Provider AI
+
+La pipeline fa due passaggi per ogni immagine:
+
+1. **Amenity classification**: usa sempre Gemini Vision con il modello top-level `model` in `prompts.yaml`.
+2. **Content generation**: genera `Caption_Experience`, `Description_Experience`, `Alt_Text` e `Check_Room` con il provider configurato in `content_generation`.
+
+Esempio OpenRouter:
+
+```yaml
+model: gemini-3.1-flash-lite
+content_generation:
+  provider: openrouter
+  model: openai/gpt-4o
+  temperature: 1.0
+  max_tokens: 500
+```
+
+Esempio Gemini per i copy:
+
+```yaml
+model: gemini-3.1-flash-lite
+content_generation:
+  provider: gemini
+  model: gemini-3.1-flash-lite
+  temperature: 0.8
+  max_tokens: 500
+```
+
+Con OpenRouter la pipeline invia l'immagine come data URL base64 allo Chat Completions API, quindi anche ChatGPT vede direttamente la foto. Non e' uno step di riscrittura del testo Gemini.
 
 ## Input CSV
 
@@ -70,63 +104,55 @@ Colonne usate quando presenti per migliorare prompt, output e naming:
 
 ## Eseguire la pipeline
 
-### Singolo hotel per Propid
+Singolo hotel per Propid:
 
 ```bash
 python pipeline.py --input data.csv --propid 77519
 ```
 
-### Piu hotel per Propid
+Piu hotel per Propid:
 
 ```bash
 python pipeline.py --input data.csv --propid 77519,98373
 ```
 
-### Hotel per nome esatto
+Hotel per nome esatto:
 
 ```bash
 python pipeline.py --input data.csv --hotel-name "Zante Park Resort & Spa, BEST WESTERN Premier Collection"
 ```
 
-### Lista di hotel da file
+Lista di hotel da file:
 
 ```bash
 python pipeline.py --input data.csv --hotel-name-file hotels.txt
 ```
 
-Il file deve contenere un nome hotel per riga.
-
-### Prossimi hotel non ancora processati
+Prossimi hotel non ancora processati:
 
 ```bash
 python pipeline.py --input data.csv --next-hotels 3
 ```
 
-### Rigenerare output esistenti
+Rigenerare output esistenti:
 
 ```bash
 python pipeline.py --input data.csv --propid 77519 --force
 ```
 
-### Worker paralleli
+Worker paralleli:
 
 ```bash
 python pipeline.py --input data.csv --next-hotels 10 --workers 15
 ```
 
-Default: `--workers 5`.
+Default: `--workers 5`. Valore consigliato con Gemini Tier 1: `--workers 15`.
 
-Valore consigliato con Gemini Tier 1: `--workers 15`.
-
-Evita di superare 20 worker: rate limit Gemini e download immagini diventano il collo di bottiglia.
-
-### Dry run
+Dry run:
 
 ```bash
 python pipeline.py --input data.csv --next-hotels 5 --workers 15 --dry-run
 ```
-
-Il dry run stampa stima immagini, chiamate API, tempo e costo. Non scarica immagini e non chiama Gemini.
 
 ## Output pipeline
 
@@ -167,11 +193,7 @@ Durante il processamento di un hotel, la pipeline salva un sidecar di progresso:
 output_hotels/<Propid>_<hotel-name-slug>.progress.jsonl
 ```
 
-Se il processo si interrompe, rilancia lo stesso comando: le immagini gia completate vengono recuperate dal checkpoint.
-
-Quando l'hotel finisce correttamente, il sidecar viene eliminato automaticamente.
-
-Per ripartire da zero su un hotel parzialmente processato, elimina manualmente il relativo `.progress.jsonl` oppure usa `--force` se l'output CSV esiste gia.
+Se il processo si interrompe, rilancia lo stesso comando: le immagini gia completate vengono recuperate dal checkpoint. Quando l'hotel finisce correttamente, il sidecar viene eliminato automaticamente.
 
 ## Export Excel
 
@@ -186,12 +208,6 @@ Default:
 - input: `output_hotels/all_hotels_cumulative.csv`
 - output: `output_hotels/content_export.xlsx`
 - delimiter: `;`
-
-Comando esplicito equivalente:
-
-```bash
-python export_content_excel.py --input output_hotels/all_hotels_cumulative.csv --output output_hotels/content_export.xlsx
-```
 
 L'Excel contiene solo queste colonne, in questo ordine:
 
@@ -227,10 +243,6 @@ Mappatura export:
 
 Nota importante: l'export non usa eventuali colonne legacy `Caption` e `Description`; usa sempre `Caption_Experience` e `Description_Experience` prodotte dalla pipeline attuale.
 
-Il file `.xlsx` viene generato con sola standard library Python (`csv`, `zipfile`, XML). Non servono `openpyxl`, `pandas` o altre librerie esterne.
-
-La prima riga dell'Excel e' congelata e ha l'autofilter attivo.
-
 ## Logging
 
 Ogni run crea un log JSONL in:
@@ -239,20 +251,14 @@ Ogni run crea un log JSONL in:
 logs/pipeline_YYYYMMDD_HHMMSS.log
 ```
 
-Campi principali:
+Lo step `generation` include anche:
 
-- `timestamp`
-- `propid`
-- `hotel_name`
-- `asset_fileid`
-- `asset_index`
-- `asset_caption`
-- `asset_link`
-- `step`
-- `ai_amenity_category`
-- `ai_amenity_score`
-- `duration_ms`
-- `error`
+- `generation_provider`
+- `generation_model`
+- `Caption_Experience`
+- `Description_Experience`
+- `Alt_Text`
+- `Check_Room`
 
 Per diagnostica piu dettagliata:
 
@@ -260,21 +266,21 @@ Per diagnostica piu dettagliata:
 python pipeline.py --input data.csv --propid 77519 --debug-log
 ```
 
-Con `--debug-log` vengono tracciati anche retry, parse failure, checkpoint hit, tempi di attesa, status HTTP e snippet delle risposte Gemini quando utile.
+Con `--debug-log` vengono tracciati retry, parse failure, checkpoint hit, status HTTP e body HTTP sintetizzato quando disponibile.
 
 ## Test
 
-Esegui i test dell'export Excel con:
+Esegui tutti i test con:
 
 ```bash
-python -m unittest test_export_content_excel.py
+python -m unittest
 ```
 
 Verifica manuale completa consigliata:
 
 ```bash
-python -m unittest test_export_content_excel.py
-python pipeline.py --input data.csv --propid 77519
+python -m unittest
+python pipeline.py --input data.csv --propid 77519 --force --debug-log
 python export_content_excel.py --input output_hotels/all_hotels_cumulative.csv --output output_hotels/content_export.xlsx
 ```
 
@@ -282,27 +288,18 @@ python export_content_excel.py --input output_hotels/all_hotels_cumulative.csv -
 
 ### Missing Gemini API key
 
-Errore tipico:
+`GEMINI_API_KEY` serve sempre perché la classificazione amenity resta Gemini.
 
-```text
-Missing Gemini API key. Set --api-key or GEMINI_API_KEY.
-```
+### Missing OpenRouter API key
 
-Soluzione: imposta `GEMINI_API_KEY` in `.env`, come secret Codespaces, oppure passa `--api-key`.
+Se `content_generation.provider: openrouter`, imposta `OPENROUTER_API_KEY` in `.env`, come secret Codespaces, oppure passa `--openrouter-api-key`.
 
-### Propid non trovato
+### Provider non supportato
 
-Errore tipico:
+`content_generation.provider` accetta solo:
 
-```text
-Propid not found in CSV: 77519
-```
-
-Controlla che il valore sia presente nella colonna `Listing_MappedID` e che il CSV sia quello corretto.
-
-### Nome hotel non trovato o ambiguo
-
-La selezione con `--hotel-name` richiede match esatto dopo normalizzazione degli spazi. Se piu hotel hanno lo stesso nome, usa `--propid`.
+- `gemini`
+- `openrouter`
 
 ### Output gia esistente
 
@@ -312,20 +309,6 @@ Per rigenerare:
 
 ```bash
 python pipeline.py --input data.csv --propid 77519 --force
-```
-
-### Export Excel vuoto o incompleto
-
-Controlla prima il cumulativo:
-
-```bash
-ls output_hotels/all_hotels_cumulative.csv
-```
-
-Poi rigenera l'Excel:
-
-```bash
-python export_content_excel.py
 ```
 
 ## File ignorati da Git
