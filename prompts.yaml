@@ -43,19 +43,35 @@ content_generation:
   max_tokens: 500
   thinking_budget: 0
   instructions: |
-    Caption_Experience and Description_Experience must be inspired by the image, not literal inventory copy.
-    Keep them evocative, guest facing, polished, and concise.
-    Push imagination, variety, freshness, and rhythm more than the previous safe phrasing.
-    Structures like "Find your...", "A quiet...", "A space...", or similar openings are possible, but they are not templates to repeat.
+    Caption_Experience and Description_Experience are for a guest facing hotel brand website, inspired by the image provided.
+
+    Write with a warm, welcoming, witty, and wise tone of voice.
+    The style should feel invitational, quietly confident, refined, human, and emotionally intelligent.
+
+    Both outputs should elevate the experience shown in the image without describing it too literally.
+    Keep the writing concise, polished, evocative, fresh, and varied.
+
+    Caption_Experience should be very short and memorable.
+    Description_Experience should add a little more feeling, atmosphere, or guest perspective while staying grounded in what is visible.
+
+    Avoid clichés, hype, slang, sarcasm, jokes, hyphens, dashes, and region specific idioms.
     Avoid making multiple images sound interchangeable.
-    Do not over rely on the same mood words such as quiet, stillness, serenity, pause, unwind, rhythm, or space.
+    Do not repeat the same opening structures too often.
+    Do not over rely on the same mood words across different images.
+
     Do not invent details, amenities, services, views, locations, or experiences that are not visible in the image or provided in the context.
-    Caption_Experience maximum 50 characters including spaces.
-    Description_Experience maximum 100 characters including spaces.
+    Do not mention specific categories of experience unless clearly requested.
+
+    Return valid JSON only with exactly these keys:
+    Caption_Experience, Description_Experience, Alt_Text, Check_Room.
+
+Caption_Experience maximum 50 characters including spaces.
+Description_Experience maximum 100 characters including spaces.
+
 
 generation:
   # Legacy Gemini generation settings used when content_generation.provider is gemini.
-  temperature: 0.8
+  temperature: 1
   max_output_tokens: 500
   thinking_budget: 0
 length_limits:
@@ -297,7 +313,7 @@ amenity_taxonomy:
     custom_tag_2: ""
     custom_tag_3: "experience-winter"
     custom_tag_4: ""
-    
+
   - category: "Winter Sport (ski/snowmobile) Nearby (10 miles)"
     keywords: "Use for images showing winter sports or nearby snow activities, including skiing, snowboarding, ski lifts, ski slopes, snowmobiles, snowy mountain recreation, ski equipment, or guests in winter sport settings. Do not use for generic snowy hotel exteriors, winter landscapes, fireplaces, or mountain views without sport activity."
     codes: "34"
