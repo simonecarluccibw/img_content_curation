@@ -35,15 +35,15 @@ AMENITY_COLUMNS = [
     "Amenity_CustomTags",
 ]
 CONTENT_COLUMNS = [
-    #"Caption_Basic",
-    #"Description_Basic",
     "Caption_Experience",
     "Description_Experience",
     "Alt_Text",
     "Check_Room",
 ]
+CONTENT_RESPONSE_KEYS = CONTENT_COLUMNS
 CLASSIFICATION_SCORE_THRESHOLD = 0.4
 OTHER = "Other"
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 CLASSIFICATION_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -82,13 +82,17 @@ def shorten_text(value: str, limit: int = 400) -> str:
     return compact[:limit] + "...<truncated>"
 
 
-def log_debug_event(
-    logger: RunLogger,
-    debug_log: bool,
-    record: Dict,
-) -> None:
+def log_debug_event(logger: RunLogger, debug_log: bool, record: Dict) -> None:
     if debug_log:
         logger.log(record)
+
+
+def read_http_error_body(exc: urllib.error.HTTPError, limit: int = 1200) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    return shorten_text(body, limit=limit)
 
 
 def load_dotenv(dotenv_path: Path) -> None:
@@ -127,9 +131,14 @@ def parse_args() -> argparse.Namespace:
         help="Gemini API key. Defaults to GEMINI_API_KEY.",
     )
     parser.add_argument(
+        "--openrouter-api-key",
+        default=os.environ.get("OPENROUTER_API_KEY"),
+        help="OpenRouter API key. Defaults to OPENROUTER_API_KEY.",
+    )
+    parser.add_argument(
         "--model",
         default=None,
-        help="Override the model from the prompts file.",
+        help="Override the Gemini model from the prompts file.",
     )
     parser.add_argument(
         "--propid",
@@ -143,10 +152,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="One or more exact hotel names. Repeat the flag for multiple names.",
     )
-    parser.add_argument(
-        "--hotel-name-file",
-        help="Text file containing one hotel name per line.",
-    )
+    parser.add_argument("--hotel-name-file", help="Text file containing one hotel name per line.")
     parser.add_argument(
         "--next-hotels",
         type=int,
@@ -194,11 +200,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debug-log",
         action="store_true",
-        help="Write detailed diagnostic records for retries, parsing failures, and raw Gemini snippets.",
+        help="Write detailed diagnostic records for retries, parsing failures, and raw API snippets.",
     )
     args = parser.parse_args()
-    if not args.api_key and not args.dry_run:
-        parser.error("Missing Gemini API key. Set --api-key or GEMINI_API_KEY.")
     if not args.propid and not args.hotel_name and not args.hotel_name_file and not args.next_hotels:
         parser.error("Select hotels with --propid, --hotel-name, --hotel-name-file, or --next-hotels.")
     if args.next_hotels is not None and args.next_hotels <= 0:
@@ -363,6 +367,27 @@ def extract_json_text(api_response: Dict) -> str:
     return raw
 
 
+def extract_openrouter_text(api_response: Dict) -> str:
+    choices = api_response.get("choices") or []
+    if not choices:
+        raise RuntimeError("OpenRouter response has no choices.")
+    message = (choices[0] or {}).get("message") or {}
+    content = message.get("content", "")
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, dict):
+                texts.append(str(part.get("text", "")))
+        content = "".join(texts)
+    raw = str(content).strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw.replace("json", "", 1).strip()
+    if not raw:
+        raise RuntimeError("OpenRouter returned an empty text payload.")
+    return raw
+
+
 def summarize_api_response(api_response: Dict, limit: int = 1200) -> str:
     try:
         serialized = json.dumps(api_response, ensure_ascii=False)
@@ -386,7 +411,7 @@ def extract_finish_reason(api_response: Dict) -> str:
 def extract_first_json_object(raw_text: str) -> str:
     start = raw_text.find("{")
     if start == -1:
-        raise RuntimeError(f"Gemini returned no JSON object: {raw_text[:200]}")
+        raise RuntimeError(f"AI returned no JSON object: {raw_text[:200]}")
     depth = 0
     in_string = False
     escape = False
@@ -408,7 +433,17 @@ def extract_first_json_object(raw_text: str) -> str:
             depth -= 1
             if depth == 0:
                 return raw_text[start : index + 1]
-    raise RuntimeError(f"Gemini returned an unterminated JSON object: {raw_text[:200]}")
+    raise RuntimeError(f"AI returned an unterminated JSON object: {raw_text[:200]}")
+
+
+def parse_content_generation_text(raw_text: str) -> Dict[str, str]:
+    parsed = json.loads(extract_first_json_object(raw_text))
+    return {
+        "Caption_Experience": str(parsed.get("Caption_Experience", "")).strip(),
+        "Description_Experience": str(parsed.get("Description_Experience", "")).strip(),
+        "Alt_Text": str(parsed.get("Alt_Text", "")).strip(),
+        "Check_Room": coerce_check_room(parsed.get("Check_Room", "0")),
+    }
 
 
 def coerce_check_room(value: object) -> str:
@@ -446,8 +481,6 @@ def harmonize_row_schema(row: Dict[str, str]) -> Dict[str, str]:
     normalized["Amenity_CustomTag4"] = normalized.get("Amenity_CustomTag4") or normalized.get(
         "AI_Amenity_CustomTag4", ""
     )
-    #normalized["Caption_Basic"] = normalized.get("Caption_Basic") or normalized.get("AI_Caption_Basic", "")
-    #normalized["Description_Basic"] = normalized.get("Description_Basic") or normalized.get("AI_Description_Basic", "")
     normalized["Caption_Experience"] = normalized.get("Caption_Experience") or normalized.get(
         "AI_Caption_Experience", ""
     )
@@ -467,10 +500,42 @@ def harmonize_row_schema(row: Dict[str, str]) -> Dict[str, str]:
     return normalized
 
 
+def get_content_generation_config(config: Dict, gemini_model: str) -> Dict:
+    legacy = config.get("generation", {}) or {}
+    section = config.get("content_generation", {}) or {}
+    provider = str(section.get("provider", "gemini")).strip().casefold()
+    if provider not in {"gemini", "openrouter"}:
+        raise RuntimeError(
+            f"Unsupported content_generation.provider: {provider}. Use 'gemini' or 'openrouter'."
+        )
+    default_model = gemini_model if provider == "gemini" else "openai/gpt-4o"
+    return {
+        "provider": provider,
+        "model": str(section.get("model") or default_model),
+        "temperature": section.get("temperature", legacy.get("temperature", 0.8)),
+        "max_tokens": section.get("max_tokens", section.get("max_output_tokens", legacy.get("max_output_tokens", 500))),
+        "thinking_budget": section.get("thinking_budget", legacy.get("thinking_budget", 0)),
+        "instructions": str(section.get("instructions", "")).strip(),
+    }
+
+
+def validate_runtime_keys(args: argparse.Namespace, content_generation: Dict) -> None:
+    if args.dry_run:
+        return
+    if not args.api_key:
+        raise RuntimeError("Missing Gemini API key. Set --api-key or GEMINI_API_KEY.")
+    if content_generation["provider"] == "openrouter" and not args.openrouter_api_key:
+        raise RuntimeError(
+            "Missing OpenRouter API key. Set --openrouter-api-key or OPENROUTER_API_KEY because content_generation.provider is openrouter."
+        )
+
+
 def build_prompt(row: Dict[str, str], config: Dict) -> str:
     tone = config.get("tone_of_voice", "").strip()
-    style = config.get("style_rules", {})
-    limits = config.get("length_limits", {})
+    style = config.get("style_rules", {}) or {}
+    limits = config.get("length_limits", {}) or {}
+    content_generation = config.get("content_generation", {}) or {}
+    extra_instructions = str(content_generation.get("instructions", "")).strip()
     context_lines = [
         f"Hotel name: {row.get('Listing_Name', '').strip()}",
         f"Brand: {row.get('Listing_Brand', '').strip()}",
@@ -478,11 +543,9 @@ def build_prompt(row: Dict[str, str], config: Dict) -> str:
         f"Media type: {row.get('Asset_MediaType', '').strip()}",
         f"Image index: {row.get('Asset_Index', '').strip()}",
     ]
-    return (
+    prompt = (
         "You are generating hotel image metadata in English for hospitality distribution.\n"
         f"Tone of voice: {tone}\n"
-        #f"Basic caption style: {style.get('basic_caption', '')}\n"
-        #f"Basic description style: {style.get('basic_description', '')}\n"
         f"Experience caption style: {style.get('experience_caption', '')}\n"
         f"Experience description style: {style.get('experience_description', '')}\n"
         f"Alt text style: {style.get('alt_text', '')}\n"
@@ -490,20 +553,21 @@ def build_prompt(row: Dict[str, str], config: Dict) -> str:
         f"Description max words: {limits.get('description_max_words', 36)}\n"
         f"Alt text max words: {limits.get('alt_text_max_words', 18)}\n"
         "Rules:\n"
-        "- Describe only what is visible in the image.\n"
-        "- Avoid unverifiable claims, room types, amenities, or views unless clearly visible.\n"
-        "- Keep the basic outputs factual and commercially neutral.\n"
-        "- Keep the experience outputs more evocative, but still grounded in the visual content.\n"
-        "- Alt text must be accessible, concise, and non-promotional.\n"
+        "- Caption_Experience and Description_Experience must be inspired by the image, evocative, and not too literal.\n"
+        "- Push imagination, freshness, and editorial variety while staying grounded in the visual content.\n"
+        "- Structures like 'Find your...', 'A quiet...', or 'A space...' are possible, but do not lean on them as repeated patterns.\n"
+        "- Avoid making captions and descriptions interchangeable across similar images.\n"
+        "- Do not invent amenities, services, locations, awards, views, room types, or details not visible or provided.\n"
+        "- Alt text must be accessible, concise, factual, and non-promotional.\n"
         "- Set Check_Room to 1 only if the image clearly shows a hotel guest room or its private bathroom.\n"
         "- Set Check_Room to 0 for all other hotel scenes.\n"
         "- Return valid JSON only.\n"
         "Return an object with exactly these keys:\n"
-        #'Caption_Basic, Description_Basic, Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n'
-        'Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n'
-        "Image context:\n"
-        + "\n".join(context_lines)
+        "Caption_Experience, Description_Experience, Alt_Text, Check_Room.\n"
     )
+    if extra_instructions:
+        prompt += f"Additional content generation instructions:\n{extra_instructions}\n"
+    return prompt + "Image context:\n" + "\n".join(context_lines)
 
 
 def build_classification_prompt(row: Dict[str, str], taxonomy: List[Dict]) -> str:
@@ -524,7 +588,7 @@ def build_classification_prompt(row: Dict[str, str], taxonomy: List[Dict]) -> st
         "- A guest room or a private bathroom is not an amenity category unless another listed amenity is visually dominant.\n"
         f"- If no category fits with confidence >= {CLASSIFICATION_SCORE_THRESHOLD}, return Other.\n"
         "- Return valid JSON only, no explanation, no markdown.\n"
-        'Return exactly: {"category": "<category name or Other>", "score": <float 0.0-1.0>}'
+        '{"category": "<category name or Other>", "score": <float 0.0-1.0>}'
     )
 
 
@@ -549,7 +613,6 @@ def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, 
     text = raw_text.strip()
     if not text:
         raise RuntimeError("Gemini returned an empty classification payload.")
-
     try:
         parsed = json.loads(extract_first_json_object(text))
         category = str(parsed.get("category", OTHER)).strip()
@@ -557,7 +620,6 @@ def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, 
         return {"category": category or OTHER, "score": score}
     except (ValueError, json.JSONDecodeError, RuntimeError):
         pass
-
     if "|||" in text:
         category_part, score_part = text.split("|||", 1)
         category = category_part.strip() or OTHER
@@ -566,7 +628,6 @@ def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, 
         except ValueError:
             score = 0.0
         return {"category": category, "score": score}
-
     lowered = text.casefold()
     matched_category = None
     for entry in taxonomy:
@@ -575,7 +636,6 @@ def parse_classification_text(raw_text: str, taxonomy: List[Dict]) -> Dict[str, 
             break
     if matched_category is None and OTHER.casefold() in lowered:
         matched_category = OTHER
-
     score_match = re.search(r"([01](?:\.\d+)?)", text)
     score = float(score_match.group(1)) if score_match else 0.0
     if matched_category:
@@ -598,20 +658,12 @@ def call_gemini_classification(
     log_context: Dict,
     debug_log: bool,
 ) -> Dict:
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
+    )
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": base64.b64encode(image_bytes).decode("ascii"),
-                        }
-                    },
-                ]
-            }
-        ],
+        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}}]}],
         "generationConfig": {
             "temperature": config.get("classification", {}).get("temperature", 0.1),
             "maxOutputTokens": config.get("classification", {}).get("max_output_tokens", 100),
@@ -620,298 +672,200 @@ def call_gemini_classification(
             "thinkingConfig": build_thinking_config(config.get("classification", {})),
         },
     }
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
-    )
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     last_error = None
     for attempt in range(1, max_retries + 1):
+        request = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
-                raw_text = extract_json_text(response_data)
-                try:
-                    return parse_classification_text(raw_text, taxonomy)
-                except Exception as parse_exc:
-                    log_debug_event(logger, debug_log, {
-                        **log_context,
-                        "step": "classification_parse_error",
-                        "attempt": attempt,
-                        "duration_ms": None,
-                        "error": str(parse_exc),
-                        "finish_reason": extract_finish_reason(response_data),
-                        "raw_response_excerpt": shorten_text(raw_text),
-                        "api_response_excerpt": summarize_api_response(response_data),
-                    })
-                    raise
+                return parse_classification_text(extract_json_text(response_data), taxonomy)
         except urllib.error.HTTPError as exc:
             last_error = exc
-            if exc.code == 429:
-                retry_after = exc.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
-                log_debug_event(logger, debug_log, {
-                    **log_context,
-                    "step": "classification_retry",
-                    "attempt": attempt,
-                    "http_status": exc.code,
-                    "retry_after": retry_after,
-                    "wait_seconds": wait,
-                    "error": str(exc),
-                })
-                time.sleep(wait)
-                continue
+            wait = float(exc.headers.get("Retry-After")) if exc.code == 429 and exc.headers.get("Retry-After") else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {**log_context, "step": "classification_retry", "attempt": attempt, "http_status": exc.code, "http_error_body": read_http_error_body(exc), "wait_seconds": wait, "error": str(exc)})
             if attempt == max_retries:
                 break
-            log_debug_event(logger, debug_log, {
-                **log_context,
-                "step": "classification_retry",
-                "attempt": attempt,
-                "http_status": exc.code,
-                "retry_after": None,
-                "wait_seconds": min(2.0 ** attempt, 60) + random.uniform(0, 1),
-                "error": str(exc),
-            })
-            time.sleep(min(2.0 ** attempt, 60) + random.uniform(0, 1))
+            time.sleep(wait)
         except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_retries:
                 break
             wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
-            log_debug_event(logger, debug_log, {
-                **log_context,
-                "step": "classification_retry",
-                "attempt": attempt,
-                "http_status": None,
-                "retry_after": None,
-                "wait_seconds": wait,
-                "error": str(exc),
-            })
+            log_debug_event(logger, debug_log, {**log_context, "step": "classification_retry", "attempt": attempt, "http_status": None, "wait_seconds": wait, "error": str(exc)})
             time.sleep(wait)
+
     fallback_payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": fallback_prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": base64.b64encode(image_bytes).decode("ascii"),
-                        }
-                    },
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.0,
-            "maxOutputTokens": 40,
-            "responseMimeType": "text/plain",
-        },
+        "contents": [{"parts": [{"text": fallback_prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}}]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 40, "responseMimeType": "text/plain"},
     }
-    fallback_request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(fallback_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     fallback_error = None
     for attempt in range(1, max_retries + 1):
+        request = urllib.request.Request(endpoint, data=json.dumps(fallback_payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(fallback_request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
-                raw_text = extract_json_text(response_data)
-                try:
-                    return parse_classification_text(raw_text, taxonomy)
-                except Exception as parse_exc:
-                    log_debug_event(logger, debug_log, {
-                        **log_context,
-                        "step": "classification_fallback_parse_error",
-                        "attempt": attempt,
-                        "duration_ms": None,
-                        "error": str(parse_exc),
-                        "finish_reason": extract_finish_reason(response_data),
-                        "raw_response_excerpt": shorten_text(raw_text),
-                        "api_response_excerpt": summarize_api_response(response_data),
-                    })
-                    raise
-        except urllib.error.HTTPError as exc:
-            fallback_error = exc
-            if exc.code == 429:
-                retry_after = exc.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
-                log_debug_event(logger, debug_log, {
-                    **log_context,
-                    "step": "classification_fallback_retry",
-                    "attempt": attempt,
-                    "http_status": exc.code,
-                    "retry_after": retry_after,
-                    "wait_seconds": wait,
-                    "error": str(exc),
-                })
-                time.sleep(wait)
-                continue
-            if attempt == max_retries:
-                break
-            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
-            log_debug_event(logger, debug_log, {
-                **log_context,
-                "step": "classification_fallback_retry",
-                "attempt": attempt,
-                "http_status": exc.code,
-                "retry_after": None,
-                "wait_seconds": wait,
-                "error": str(exc),
-            })
-            time.sleep(wait)
-        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+                return parse_classification_text(extract_json_text(response_data), taxonomy)
+        except Exception as exc:
             fallback_error = exc
             if attempt == max_retries:
                 break
             wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
-            log_debug_event(logger, debug_log, {
-                **log_context,
-                "step": "classification_fallback_retry",
-                "attempt": attempt,
-                "http_status": None,
-                "retry_after": None,
-                "wait_seconds": wait,
-                "error": str(exc),
-            })
+            log_debug_event(logger, debug_log, {**log_context, "step": "classification_fallback_retry", "attempt": attempt, "wait_seconds": wait, "error": str(exc)})
             time.sleep(wait)
     raise RuntimeError(
         f"Classification failed after {max_retries} attempts. JSON error: {last_error}. Fallback error: {fallback_error}"
     )
 
 
-def call_gemini(
+def call_gemini_generation(
     image_bytes: bytes,
     mime_type: str,
     prompt: str,
     api_key: str,
-    model: str,
-    config: Dict,
+    content_generation: Dict,
     timeout: int,
     max_retries: int,
     logger: RunLogger,
     log_context: Dict,
     debug_log: bool,
 ) -> Dict[str, str]:
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": base64.b64encode(image_bytes).decode("ascii"),
-                        }
-                    },
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": config.get("generation", {}).get("temperature", 0.3),
-            "maxOutputTokens": config.get("generation", {}).get("max_output_tokens", 5000),
-            "responseMimeType": "application/json",
-            "thinkingConfig": build_thinking_config(config.get("generation", {})),
-        },
-    }
+    model = content_generation["model"]
     endpoint = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
     )
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}}]}],
+        "generationConfig": {
+            "temperature": content_generation["temperature"],
+            "maxOutputTokens": content_generation["max_tokens"],
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": content_generation.get("thinking_budget", 0)},
+        },
+    }
     last_error = None
     for attempt in range(1, max_retries + 1):
+        request = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
                 raw_text = extract_json_text(response_data)
-                try:
-                    parsed = json.loads(extract_first_json_object(raw_text))
-                except Exception as parse_exc:
-                    log_debug_event(logger, debug_log, {
-                        **log_context,
-                        "step": "generation_parse_error",
-                        "attempt": attempt,
-                        "duration_ms": None,
-                        "error": str(parse_exc),
-                        "finish_reason": extract_finish_reason(response_data),
-                        "raw_response_excerpt": shorten_text(raw_text),
-                        "api_response_excerpt": summarize_api_response(response_data),
-                    })
-                    raise
-                return {
-                    #"Caption_Basic": str(parsed.get("Caption_Basic", "")).strip(),
-                    #"Description_Basic": str(parsed.get("Description_Basic", "")).strip(),
-                    "Caption_Experience": str(parsed.get("Caption_Experience", "")).strip(),
-                    "Description_Experience": str(parsed.get("Description_Experience", "")).strip(),
-                    "Alt_Text": str(parsed.get("Alt_Text", "")).strip(),
-                    "Check_Room": coerce_check_room(parsed.get("Check_Room", "0")),
-                }
+                result = parse_content_generation_text(raw_text)
+                result["_generation_provider"] = "gemini"
+                result["_generation_model"] = model
+                return result
         except urllib.error.HTTPError as exc:
             last_error = exc
-            if exc.code == 429:
-                retry_after = exc.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else min(2.0 ** attempt, 60) + random.uniform(0, 1)
-                log_debug_event(logger, debug_log, {
-                    **log_context,
-                    "step": "generation_retry",
-                    "attempt": attempt,
-                    "http_status": exc.code,
-                    "retry_after": retry_after,
-                    "wait_seconds": wait,
-                    "error": str(exc),
-                })
-                time.sleep(wait)
-                continue
+            wait = float(exc.headers.get("Retry-After")) if exc.code == 429 and exc.headers.get("Retry-After") else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {**log_context, "step": "generation_retry", "generation_provider": "gemini", "generation_model": model, "attempt": attempt, "http_status": exc.code, "http_error_body": read_http_error_body(exc), "wait_seconds": wait, "error": str(exc)})
             if attempt == max_retries:
                 break
-            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
-            log_debug_event(logger, debug_log, {
-                **log_context,
-                "step": "generation_retry",
-                "attempt": attempt,
-                "http_status": exc.code,
-                "retry_after": None,
-                "wait_seconds": wait,
-                "error": str(exc),
-            })
             time.sleep(wait)
         except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_retries:
                 break
             wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
-            log_debug_event(logger, debug_log, {
-                **log_context,
-                "step": "generation_retry",
-                "attempt": attempt,
-                "http_status": None,
-                "retry_after": None,
-                "wait_seconds": wait,
-                "error": str(exc),
-            })
+            log_debug_event(logger, debug_log, {**log_context, "step": "generation_retry", "generation_provider": "gemini", "generation_model": model, "attempt": attempt, "http_status": None, "wait_seconds": wait, "error": str(exc)})
             time.sleep(wait)
     raise RuntimeError(f"Generation failed after {max_retries} attempts: {last_error}")
 
 
-def resolve_amenity_fields(
-    category: str,
-    score: float,
-    taxonomy: List[Dict],
+def call_openrouter_generation(
+    image_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+    api_key: str,
+    content_generation: Dict,
+    timeout: int,
+    max_retries: int,
+    logger: RunLogger,
+    log_context: Dict,
+    debug_log: bool,
 ) -> Dict[str, str]:
+    model = content_generation["model"]
+    data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "temperature": content_generation["temperature"],
+        "max_tokens": content_generation["max_tokens"],
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/simonecarluccibw/img_content_curation",
+        "X-Title": "img_content_curation",
+    }
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        request = urllib.request.Request(
+            OPENROUTER_CHAT_COMPLETIONS_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+                raw_text = extract_openrouter_text(response_data)
+                result = parse_content_generation_text(raw_text)
+                result["_generation_provider"] = "openrouter"
+                result["_generation_model"] = model
+                log_debug_event(logger, debug_log, {**log_context, "step": "openrouter_generation_response", "generation_provider": "openrouter", "generation_model": model, "raw_response_excerpt": shorten_text(raw_text), "api_response_excerpt": summarize_api_response(response_data), "error": None})
+                return result
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            wait = float(exc.headers.get("Retry-After")) if exc.code == 429 and exc.headers.get("Retry-After") else min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {**log_context, "step": "generation_retry", "generation_provider": "openrouter", "generation_model": model, "attempt": attempt, "http_status": exc.code, "http_error_body": read_http_error_body(exc), "wait_seconds": wait, "error": str(exc)})
+            if attempt == max_retries:
+                break
+            time.sleep(wait)
+        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            last_error = exc
+            if attempt == max_retries:
+                break
+            wait = min(2.0 ** attempt, 60) + random.uniform(0, 1)
+            log_debug_event(logger, debug_log, {**log_context, "step": "generation_retry", "generation_provider": "openrouter", "generation_model": model, "attempt": attempt, "http_status": None, "wait_seconds": wait, "error": str(exc)})
+            time.sleep(wait)
+    raise RuntimeError(f"OpenRouter generation failed after {max_retries} attempts: {last_error}")
+
+
+def generate_content(
+    image_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+    gemini_api_key: str,
+    openrouter_api_key: str,
+    content_generation: Dict,
+    timeout: int,
+    max_retries: int,
+    logger: RunLogger,
+    log_context: Dict,
+    debug_log: bool,
+) -> Dict[str, str]:
+    if content_generation["provider"] == "gemini":
+        return call_gemini_generation(
+            image_bytes, mime_type, prompt, gemini_api_key, content_generation, timeout, max_retries, logger, log_context, debug_log
+        )
+    if content_generation["provider"] == "openrouter":
+        return call_openrouter_generation(
+            image_bytes, mime_type, prompt, openrouter_api_key, content_generation, timeout, max_retries, logger, log_context, debug_log
+        )
+    raise RuntimeError(f"Unsupported content generation provider: {content_generation['provider']}")
+
+
+def resolve_amenity_fields(category: str, score: float, taxonomy: List[Dict]) -> Dict[str, str]:
     empty = {col: "" for col in AMENITY_COLUMNS}
     if score < CLASSIFICATION_SCORE_THRESHOLD or category == OTHER:
         empty["Amenity_Category"] = OTHER
@@ -939,8 +893,10 @@ def resolve_amenity_fields(
 
 def enrich_row(
     row: Dict[str, str],
-    api_key: str,
-    model: str,
+    gemini_api_key: str,
+    openrouter_api_key: str,
+    classification_model: str,
+    content_generation: Dict,
     config: Dict,
     taxonomy: List[Dict],
     timeout: int,
@@ -968,8 +924,8 @@ def enrich_row(
             mime_type=mime_type,
             prompt=classification_prompt,
             fallback_prompt=classification_fallback_prompt,
-            api_key=api_key,
-            model=model,
+            api_key=gemini_api_key,
+            model=classification_model,
             config=config,
             taxonomy=taxonomy,
             timeout=timeout,
@@ -981,29 +937,19 @@ def enrich_row(
     except Exception as exc:
         classification_error = str(exc)
         classification_result = {"category": OTHER, "score": 0.0}
-        log_debug_event(logger, True, {
-            **log_context,
-            "step": "classification_fallback_other",
-            "attempt": None,
-            "duration_ms": None,
-            "error": classification_error,
-        })
+        log_debug_event(logger, True, {**log_context, "step": "classification_fallback_other", "attempt": None, "duration_ms": None, "error": classification_error})
     classification_ms = int((time.perf_counter() - t0) * 1000)
-    amenity_fields = resolve_amenity_fields(
-        classification_result["category"],
-        classification_result["score"],
-        taxonomy,
-    )
+    amenity_fields = resolve_amenity_fields(classification_result["category"], classification_result["score"], taxonomy)
 
     t1 = time.perf_counter()
     generation_prompt = build_prompt(row, config)
-    generation_fields = call_gemini(
+    generation_fields = generate_content(
         image_bytes=image_bytes,
         mime_type=mime_type,
         prompt=generation_prompt,
-        api_key=api_key,
-        model=model,
-        config=config,
+        gemini_api_key=gemini_api_key,
+        openrouter_api_key=openrouter_api_key,
+        content_generation=content_generation,
         timeout=timeout,
         max_retries=max_retries,
         logger=logger,
@@ -1039,17 +985,11 @@ def load_checkpoint(sidecar: Path) -> Dict[str, Dict]:
     return checkpoint
 
 
-def append_checkpoint(
-    sidecar: Path,
-    asset_fileid: str,
-    enriched_row: Dict,
-    lock: "threading.Lock | None" = None,
-) -> None:
+def append_checkpoint(sidecar: Path, asset_fileid: str, enriched_row: Dict, lock: "threading.Lock | None" = None) -> None:
     def _write() -> None:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
         with sidecar.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps({"asset_fileid": asset_fileid, "enriched_row": enriched_row}, ensure_ascii=False) + "\n"
-            )
+            handle.write(json.dumps({"asset_fileid": asset_fileid, "enriched_row": enriched_row}, ensure_ascii=False) + "\n")
             handle.flush()
 
     if lock is not None:
@@ -1061,14 +1001,7 @@ def append_checkpoint(
 
 def write_hotel_csv(path: Path, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        newline="",
-        delete=False,
-        dir=path.parent,
-        suffix=".tmp",
-    ) as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=path.parent, suffix=".tmp") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter=";", extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
@@ -1082,25 +1015,12 @@ def read_output_csv(path: Path) -> List[Dict[str, str]]:
         return [harmonize_row_schema(row) for row in reader]
 
 
-def update_cumulative_csv(
-    cumulative_path: Path,
-    fieldnames: List[str],
-    propid: str,
-    hotel_rows: List[Dict[str, str]],
-) -> None:
+def update_cumulative_csv(cumulative_path: Path, fieldnames: List[str], propid: str, hotel_rows: List[Dict[str, str]]) -> None:
     existing_rows: List[Dict[str, str]] = []
     if cumulative_path.exists():
         existing_rows = read_output_csv(cumulative_path)
-    remaining_rows = [
-        row
-        for row in existing_rows
-        if (row.get("Listing_MappedID") or "").strip() != propid
-    ]
-    write_hotel_csv(
-        cumulative_path,
-        fieldnames,
-        remaining_rows + [harmonize_row_schema(row) for row in hotel_rows],
-    )
+    remaining_rows = [row for row in existing_rows if (row.get("Listing_MappedID") or "").strip() != propid]
+    write_hotel_csv(cumulative_path, fieldnames, remaining_rows + [harmonize_row_schema(row) for row in hotel_rows])
 
 
 def _process_single_image(
@@ -1111,7 +1031,8 @@ def _process_single_image(
     hotel_name: str,
     args: argparse.Namespace,
     config: Dict,
-    model: str,
+    classification_model: str,
+    content_generation: Dict,
     taxonomy: List[Dict],
     logger: RunLogger,
     sidecar: Path,
@@ -1130,15 +1051,13 @@ def _process_single_image(
     }
 
     try:
-        log_debug_event(logger, args.debug_log, {
-            **log_context,
-            "step": "row_start",
-            "error": None,
-        })
+        log_debug_event(logger, args.debug_log, {**log_context, "step": "row_start", "error": None})
         ai_values = enrich_row(
             row=row,
-            api_key=args.api_key,
-            model=model,
+            gemini_api_key=args.api_key,
+            openrouter_api_key=args.openrouter_api_key,
+            classification_model=classification_model,
+            content_generation=content_generation,
             config=config,
             taxonomy=taxonomy,
             timeout=args.timeout,
@@ -1151,33 +1070,16 @@ def _process_single_image(
         classification_ms = ai_values.pop("_classification_ms", 0)
         generation_ms = ai_values.pop("_generation_ms", 0)
         classification_error = ai_values.pop("_classification_error", None)
+        generation_provider = ai_values.pop("_generation_provider", content_generation["provider"])
+        generation_model = ai_values.pop("_generation_model", content_generation["model"])
         enriched.update(ai_values)
 
+        logger.log({**log_context, "step": "classification", "ai_amenity_category": enriched.get("Amenity_Category"), "ai_amenity_score": score, "duration_ms": classification_ms, "error": classification_error})
         logger.log({
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "propid": propid,
-            "hotel_name": hotel_name,
-            "asset_fileid": asset_fileid,
-            "asset_index": row.get("Asset_Index", ""),
-            "asset_caption": row.get("Asset_Caption", ""),
-            "asset_link": row.get("Asset_Link", ""),
-            "step": "classification",
-            "ai_amenity_category": enriched.get("Amenity_Category"),
-            "ai_amenity_score": score,
-            "duration_ms": classification_ms,
-            "error": classification_error,
-        })
-        logger.log({
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "propid": propid,
-            "hotel_name": hotel_name,
-            "asset_fileid": asset_fileid,
-            "asset_index": row.get("Asset_Index", ""),
-            "asset_caption": row.get("Asset_Caption", ""),
-            "asset_link": row.get("Asset_Link", ""),
+            **log_context,
             "step": "generation",
-            #"Caption_Basic": enriched.get("Caption_Basic"),
-            #"Description_Basic": enriched.get("Description_Basic"),
+            "generation_provider": generation_provider,
+            "generation_model": generation_model,
             "Caption_Experience": enriched.get("Caption_Experience"),
             "Description_Experience": enriched.get("Description_Experience"),
             "Alt_Text": enriched.get("Alt_Text"),
@@ -1185,32 +1087,10 @@ def _process_single_image(
             "duration_ms": generation_ms,
             "error": None,
         })
-        log_debug_event(logger, args.debug_log, {
-            **log_context,
-            "step": "row_done",
-            "classification_duration_ms": classification_ms,
-            "generation_duration_ms": generation_ms,
-            "error": None,
-        })
+        log_debug_event(logger, args.debug_log, {**log_context, "step": "row_done", "classification_duration_ms": classification_ms, "generation_duration_ms": generation_ms, "generation_provider": generation_provider, "generation_model": generation_model, "error": None})
     except Exception as exc:
-        print(
-            f"[ROW ERROR] {propid} image {index}/{total} | Asset_FileID={asset_fileid} | {exc}",
-            file=sys.stderr,
-        )
-        logger.log({
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "propid": propid,
-            "hotel_name": hotel_name,
-            "asset_fileid": asset_fileid,
-            "asset_index": row.get("Asset_Index", ""),
-            "asset_caption": row.get("Asset_Caption", ""),
-            "asset_link": row.get("Asset_Link", ""),
-            "step": "error",
-            "ai_amenity_category": None,
-            "ai_amenity_score": None,
-            "duration_ms": None,
-            "error": str(exc),
-        })
+        print(f"[ROW ERROR] {propid} image {index}/{total} | Asset_FileID={asset_fileid} | {exc}", file=sys.stderr)
+        logger.log({**log_context, "step": "error", "ai_amenity_category": None, "ai_amenity_score": None, "duration_ms": None, "error": str(exc)})
         for col in AMENITY_COLUMNS:
             enriched[col] = ""
         enriched["Amenity_Category"] = OTHER
@@ -1219,13 +1099,10 @@ def _process_single_image(
         enriched["Check_Room"] = "0"
 
     enriched = harmonize_row_schema(enriched)
-
     if asset_fileid:
         append_checkpoint(sidecar, asset_fileid, enriched, lock=checkpoint_lock)
-
     if args.request_delay:
         time.sleep(args.request_delay)
-
     return enriched
 
 
@@ -1237,7 +1114,8 @@ def process_hotel(
     fieldnames: List[str],
     args: argparse.Namespace,
     config: Dict,
-    model: str,
+    classification_model: str,
+    content_generation: Dict,
     taxonomy: List[Dict],
     logger: RunLogger,
 ) -> List[Dict[str, str]]:
@@ -1258,7 +1136,6 @@ def process_hotel(
             to_process.append((index, row))
 
     total = len(rows)
-
     try:
         from tqdm import tqdm
         progress = tqdm(total=total, desc=propid, unit="img")
@@ -1291,7 +1168,8 @@ def process_hotel(
             hotel_name=hotel_name,
             args=args,
             config=config,
-            model=model,
+            classification_model=classification_model,
+            content_generation=content_generation,
             taxonomy=taxonomy,
             logger=logger,
             sidecar=sidecar,
@@ -1322,21 +1200,16 @@ def process_hotel(
     return enriched_rows
 
 
-def run_dry(
-    selected_propids: List[str],
-    groups: Dict[str, List[Dict]],
-    hotel_names: Dict[str, str],
-    prompts_config: Dict,
-    workers: int = 5,
-) -> int:
+def run_dry(selected_propids: List[str], groups: Dict[str, List[Dict]], hotel_names: Dict[str, str], prompts_config: Dict, workers: int = 5) -> int:
     cost_section = prompts_config.get("cost", {})
     class_cost = cost_section.get("classification_per_call_usd", 0.00056)
     gen_cost = cost_section.get("generation_per_call_usd", 0.00076)
     per_image = class_cost + gen_cost
-
     total_images = 0
     print("\n[DRY RUN] Estimate summary:")
-    print(f"Model: {prompts_config.get('model', 'unknown')}")
+    print(f"Classification model: {prompts_config.get('model', 'unknown')}")
+    content_section = prompts_config.get("content_generation", {}) or {}
+    print(f"Content provider: {content_section.get('provider', 'gemini')} | model: {content_section.get('model', prompts_config.get('model', 'unknown'))}")
     print(f"Per-image cost: ${per_image:.6f} (class ${class_cost:.6f} + gen ${gen_cost:.6f})")
     print(f"{'Propid':<12} {'Hotel':<50} {'Images':>8} {'API calls':>10} {'Est. cost $':>12}")
     print("-" * 96)
@@ -1345,7 +1218,6 @@ def run_dry(
         cost = n * per_image
         total_images += n
         print(f"{propid:<12} {hotel_names[propid][:50]:<50} {n:>8} {n*2:>10} {cost:>12.4f}")
-
     total_cost = total_images * per_image
     seq_hours = (total_images * 12) / 3600
     par_hours = (total_images * 12) / (3600 * workers)
@@ -1362,33 +1234,28 @@ def main() -> int:
     prompts_path = Path(args.prompts)
     output_dir = Path(args.output_dir)
     prompts_config = load_prompts(prompts_path)
-    model = args.model or prompts_config.get("model", "gemini-3.5-flash")
+    classification_model = args.model or prompts_config.get("model", "gemini-3.5-flash")
+    content_generation = get_content_generation_config(prompts_config, classification_model)
+    validate_runtime_keys(args, content_generation)
     taxonomy = prompts_config.get("amenity_taxonomy", [])
 
     rows, original_fieldnames = read_rows(input_path)
     groups, hotel_names, name_to_propids = build_indexes(rows)
     selected_propids = resolve_hotels(args, groups, hotel_names, name_to_propids, output_dir)
-    output_fieldnames = original_fieldnames + [
-        col for col in AMENITY_COLUMNS + CONTENT_COLUMNS
-        if col not in original_fieldnames
-    ]
+    output_fieldnames = original_fieldnames + [col for col in AMENITY_COLUMNS + CONTENT_COLUMNS if col not in original_fieldnames]
     if args.dry_run:
         return run_dry(selected_propids, groups, hotel_names, prompts_config, workers=args.workers)
 
     logger = RunLogger(Path(args.log_dir))
     print(f"[LOG] Detailed run log: {logger.path}")
+    print(f"[CONTENT] provider={content_generation['provider']} | model={content_generation['model']}")
     try:
         for propid in selected_propids:
             hotel_name = hotel_names[propid]
             output_path = expected_output_path(output_dir, propid, hotel_name)
             if output_path.exists() and not args.force:
                 print(f"[SKIP] {propid} | {hotel_name} | output exists: {output_path}")
-                update_cumulative_csv(
-                    cumulative_output_path(output_dir),
-                    output_fieldnames,
-                    propid,
-                    read_output_csv(output_path),
-                )
+                update_cumulative_csv(cumulative_output_path(output_dir), output_fieldnames, propid, read_output_csv(output_path))
                 continue
             enriched_rows = process_hotel(
                 propid=propid,
@@ -1398,16 +1265,12 @@ def main() -> int:
                 fieldnames=output_fieldnames,
                 args=args,
                 config=prompts_config,
-                model=model,
+                classification_model=classification_model,
+                content_generation=content_generation,
                 taxonomy=taxonomy,
                 logger=logger,
             )
-            update_cumulative_csv(
-                cumulative_output_path(output_dir),
-                output_fieldnames,
-                propid,
-                enriched_rows,
-            )
+            update_cumulative_csv(cumulative_output_path(output_dir), output_fieldnames, propid, enriched_rows)
     finally:
         logger.close()
     return 0
