@@ -1,7 +1,5 @@
 model: gemini-3.1-flash-lite
-#old model: gemini-2.5-flash
-#old model: 
-#old tone_of_voice: "Premium hospitality editorial, clear, elegant, natural, and grounded in what is visible."
+# Top-level model is used for Gemini amenity classification.
 tone_of_voice: |
   You are a hotel copywriter writing in English guest facing hotel experience content for a hotel brand website.
 
@@ -31,13 +29,32 @@ tone_of_voice: |
   Vary sentence length naturally.
   Make the copy feel polished but never stiff.
 
-  When rewriting, preserve the factual meaning.
   When creating new copy, do not invent amenities, services, locations, awards, or details not provided.
   If information is missing, write around it gracefully rather than adding assumptions.
 
   Output only the requested copy unless asked to explain choices.
 
+content_generation:
+  # Controls only Caption_Experience, Description_Experience, Alt_Text, and Check_Room.
+  # Amenity classification always uses the top-level Gemini model above.
+  provider: openrouter
+  model: openai/gpt-4o
+  temperature: 1.0
+  max_tokens: 500
+  thinking_budget: 0
+  instructions: |
+    Caption_Experience and Description_Experience must be inspired by the image, not literal inventory copy.
+    Keep them evocative, guest facing, polished, and concise.
+    Push imagination, variety, freshness, and rhythm more than the previous safe phrasing.
+    Structures like "Find your...", "A quiet...", "A space...", or similar openings are possible, but they are not templates to repeat.
+    Avoid making multiple images sound interchangeable.
+    Do not over rely on the same mood words such as quiet, stillness, serenity, pause, unwind, rhythm, or space.
+    Do not invent details, amenities, services, views, locations, or experiences that are not visible in the image or provided in the context.
+    Caption_Experience maximum 50 characters including spaces.
+    Description_Experience maximum 100 characters including spaces.
+
 generation:
+  # Legacy Gemini generation settings used when content_generation.provider is gemini.
   temperature: 0.8
   max_output_tokens: 500
   thinking_budget: 0
@@ -46,21 +63,16 @@ length_limits:
   description_max_words: 36
   alt_text_max_words: 18
 style_rules:
-  #basic_caption: "Write a short, factual image caption in polished hotel English."
-  #basic_description: "Write a compact descriptive sentence focused on visible details and setting."
-  #experience_caption: "Write a short, evocative caption that suggests guest experience without exaggeration."
-  #experience_description: "Write a richer but still concise hospitality description inspired by the atmosphere of the image."
-
   experience_caption: |
    Write a very concise English caption for a guest facing hotel brand website, inspired by the image provided.
    The caption should elevate the experience shown in the image without describing it too literally.
    Tone of voice: warm, welcoming, witty, wise.
    Style: invitational, quietly confident, refined, human, emotionally intelligent.
-   Keep it short, elegant, and evocative.
+   Keep it short, elegant, evocative, and varied.
    Avoid clichés, hype, slang, sarcasm, jokes, hyphens, dashes, and region specific idioms.
    Do not invent details not visible or provided.
    Do not mention specific categories of experience unless clearly requested.
-   Output only the caption
+   Output only the caption.
    Maximum 50 characters including spaces.
   experience_description: |
    Write a concise English description for a guest facing hotel brand website, inspired by the image provided.
@@ -70,7 +82,7 @@ style_rules:
    Style: invitational, quietly confident, refined, human, emotionally intelligent.
 
    Use clear, polished language with gentle sensory detail.
-   Keep it brief and emotionally engaging.
+   Keep it brief, emotionally engaging, imaginative, and varied.
    Avoid clichés, hype, slang, sarcasm, jokes, hyphens, dashes, and region specific idioms.
    Do not invent amenities, services, locations, or details not visible or provided.
    Do not mention specific categories of experience unless clearly requested.
