@@ -13,13 +13,13 @@ Non serve `pipeline_hotels.py`: tutta la logica di selezione hotel, resume, outp
 
 ```text
 .
-├── pipeline.py                 # Pipeline principale per classificazione e generazione contenuti
-├── export_content_excel.py     # Export Excel finale da all_hotels_cumulative.csv
-├── prompts.yaml                # Prompt, modello, tone of voice, taxonomy e stime costo
-├── requirements.txt            # Dipendenze Python minime
-├── test_export_content_excel.py # Test unitari per export Excel
-├── .env.example                # Template variabili ambiente
-└── .devcontainer/              # Setup GitHub Codespaces
+|-- pipeline.py                 # Pipeline principale per classificazione e generazione contenuti
+|-- export_content_excel.py     # Export Excel finale da all_hotels_cumulative.csv
+|-- prompts.yaml                # Prompt, modello, tone of voice, taxonomy e stime costo
+|-- requirements.txt            # Dipendenze Python minime
+|-- test_export_content_excel.py # Test unitari per export Excel
+|-- .env.example                # Template variabili ambiente
+`-- .devcontainer/              # Setup GitHub Codespaces
 ```
 
 ## Setup
