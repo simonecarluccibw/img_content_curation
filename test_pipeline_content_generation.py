@@ -121,6 +121,89 @@ class PipelineContentGenerationTests(unittest.TestCase):
         self.assertEqual(image_part["type"], "image_url")
         self.assertTrue(image_part["image_url"]["url"].startswith("data:image/jpeg;base64,"))
 
+    def test_numbered_custom_tags_increment_for_same_template(self):
+        rows = [
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+        ]
+
+        numbered = pipeline.number_custom_tag_placeholders_for_hotel(rows)
+
+        self.assertEqual(numbered[0]["Amenity_CustomTag1"], "spa-attribute-1")
+        self.assertEqual(numbered[1]["Amenity_CustomTag1"], "spa-attribute-2")
+
+    def test_numbered_custom_tags_reset_for_each_hotel_call(self):
+        first_hotel = pipeline.number_custom_tag_placeholders_for_hotel([
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+        ])
+        second_hotel = pipeline.number_custom_tag_placeholders_for_hotel([
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+        ])
+
+        self.assertEqual(first_hotel[0]["Amenity_CustomTag1"], "spa-attribute-1")
+        self.assertEqual(second_hotel[0]["Amenity_CustomTag1"], "spa-attribute-1")
+
+    def test_numbered_custom_tags_keep_separate_template_counters(self):
+        rows = [
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+            {"Amenity_CustomTag1": "experience-spa-N"},
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+            {"Amenity_CustomTag1": "experience-spa-N"},
+        ]
+
+        numbered = pipeline.number_custom_tag_placeholders_for_hotel(rows)
+
+        self.assertEqual(numbered[0]["Amenity_CustomTag1"], "spa-attribute-1")
+        self.assertEqual(numbered[1]["Amenity_CustomTag1"], "experience-spa-1")
+        self.assertEqual(numbered[2]["Amenity_CustomTag1"], "spa-attribute-2")
+        self.assertEqual(numbered[3]["Amenity_CustomTag1"], "experience-spa-2")
+
+    def test_numbered_custom_tags_use_same_index_for_multiple_templates_in_row(self):
+        rows = [
+            {"Amenity_CustomTag1": "experience-spa-N"},
+            {"Amenity_CustomTag1": "experience-spa-N"},
+            {"Amenity_CustomTag1": "experience-spa-N", "Amenity_CustomTag4": "spa-attribute-N"},
+            {"Amenity_CustomTag1": "spa-attribute-N"},
+        ]
+
+        numbered = pipeline.number_custom_tag_placeholders_for_hotel(rows)
+
+        self.assertEqual(numbered[0]["Amenity_CustomTag1"], "experience-spa-1")
+        self.assertEqual(numbered[1]["Amenity_CustomTag1"], "experience-spa-2")
+        self.assertEqual(numbered[2]["Amenity_CustomTag1"], "experience-spa-3")
+        self.assertEqual(numbered[2]["Amenity_CustomTag4"], "spa-attribute-3")
+        self.assertEqual(numbered[3]["Amenity_CustomTag1"], "spa-attribute-4")
+
+    def test_numbered_custom_tags_regenerate_custom_tags_union(self):
+        rows = [{
+            "Amenity_CustomTag1": "overview-spa",
+            "Amenity_CustomTag2": "amenity-spa",
+            "Amenity_CustomTag3": "experience-spa-N",
+            "Amenity_CustomTag4": "spa-attribute-N",
+            "Amenity_CustomTags": "stale-value",
+        }]
+
+        numbered = pipeline.number_custom_tag_placeholders_for_hotel(rows)
+
+        self.assertEqual(
+            numbered[0]["Amenity_CustomTags"],
+            "overview-spa, amenity-spa, experience-spa-1, spa-attribute-1",
+        )
+
+    def test_numbered_custom_tags_leave_non_placeholder_tags_unchanged(self):
+        rows = [{
+            "Amenity_CustomTag1": "amenity-spa",
+            "Amenity_CustomTag2": "spa-attribute-7",
+            "Amenity_CustomTag3": "spa-attribute-N-extra",
+        }]
+
+        numbered = pipeline.number_custom_tag_placeholders_for_hotel(rows)
+
+        self.assertEqual(numbered[0]["Amenity_CustomTag1"], "amenity-spa")
+        self.assertEqual(numbered[0]["Amenity_CustomTag2"], "spa-attribute-7")
+        self.assertEqual(numbered[0]["Amenity_CustomTag3"], "spa-attribute-N-extra")
+        self.assertEqual(numbered[0]["Amenity_CustomTags"], "amenity-spa, spa-attribute-7, spa-attribute-N-extra")
+
 
 if __name__ == "__main__":
     unittest.main()
