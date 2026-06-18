@@ -14,12 +14,12 @@ _PATCHED_MODULE_IDS = set()
 _SKIPPED_GENERATION_BY_ASSET: Dict[Tuple[str, str], Dict[str, object]] = {}
 
 
-def _patch_pipeline_module(globals_dict: Dict[str, object]) -> None:
+def _patch_pipeline_module(globals_dict: Dict[str, object]) -> bool:
     module_id = id(globals_dict)
     if module_id in _PATCHED_MODULE_IDS:
-        return
+        return True
     if globals_dict.get("OTHER") != "Other" or "enrich_row" not in globals_dict:
-        return
+        return False
 
     _PATCHED_MODULE_IDS.add(module_id)
     original_log = globals_dict["RunLogger"].log
@@ -143,11 +143,14 @@ def _patch_pipeline_module(globals_dict: Dict[str, object]) -> None:
         }
 
     globals_dict["enrich_row"] = enrich_row
+    return True
 
 
 def _trace_pipeline_import(frame, event, arg):
     if event == "line" and str(frame.f_code.co_filename).endswith("pipeline.py"):
-        _patch_pipeline_module(frame.f_globals)
+        if _patch_pipeline_module(frame.f_globals):
+            sys.settrace(None)
+            return None
     return _trace_pipeline_import
 
 
