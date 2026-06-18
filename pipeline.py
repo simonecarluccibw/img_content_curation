@@ -974,22 +974,35 @@ def enrich_row(
     classification_ms = int((time.perf_counter() - t0) * 1000)
     amenity_fields = resolve_amenity_fields(classification_result["category"], classification_result["score"], taxonomy)
 
-    t1 = time.perf_counter()
-    generation_prompt = build_prompt(row, config)
-    generation_fields = generate_content(
-        image_bytes=image_bytes,
-        mime_type=mime_type,
-        prompt=generation_prompt,
-        gemini_api_key=gemini_api_key,
-        openrouter_api_key=openrouter_api_key,
-        content_generation=content_generation,
-        timeout=timeout,
-        max_retries=max_retries,
-        logger=logger,
-        log_context=log_context,
-        debug_log=debug_log,
-    )
-    generation_ms = int((time.perf_counter() - t1) * 1000)
+    if amenity_fields.get("Amenity_Category") == OTHER:
+        generation_fields = {
+            "Caption_Experience": "",
+            "Description_Experience": "",
+            "Alt_Text": "",
+            "Check_Room": "0",
+            "_generation_provider": content_generation["provider"],
+            "_generation_model": content_generation["model"],
+            "_generation_skipped": True,
+            "_generation_skip_reason": "amenity_category_other",
+        }
+        generation_ms = 0
+    else:
+        t1 = time.perf_counter()
+        generation_prompt = build_prompt(row, config)
+        generation_fields = generate_content(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            prompt=generation_prompt,
+            gemini_api_key=gemini_api_key,
+            openrouter_api_key=openrouter_api_key,
+            content_generation=content_generation,
+            timeout=timeout,
+            max_retries=max_retries,
+            logger=logger,
+            log_context=log_context,
+            debug_log=debug_log,
+        )
+        generation_ms = int((time.perf_counter() - t1) * 1000)
 
     return {
         **amenity_fields,
@@ -1105,6 +1118,8 @@ def _process_single_image(
         classification_error = ai_values.pop("_classification_error", None)
         generation_provider = ai_values.pop("_generation_provider", content_generation["provider"])
         generation_model = ai_values.pop("_generation_model", content_generation["model"])
+        generation_skipped = ai_values.pop("_generation_skipped", False)
+        generation_skip_reason = ai_values.pop("_generation_skip_reason", None)
         enriched.update(ai_values)
 
         logger.log({**log_context, "step": "classification", "ai_amenity_category": enriched.get("Amenity_Category"), "ai_amenity_score": score, "duration_ms": classification_ms, "error": classification_error})
@@ -1119,8 +1134,10 @@ def _process_single_image(
             "Check_Room": enriched.get("Check_Room"),
             "duration_ms": generation_ms,
             "error": None,
+            "skipped": generation_skipped,
+            "skip_reason": generation_skip_reason,
         })
-        log_debug_event(logger, args.debug_log, {**log_context, "step": "row_done", "classification_duration_ms": classification_ms, "generation_duration_ms": generation_ms, "generation_provider": generation_provider, "generation_model": generation_model, "error": None})
+        log_debug_event(logger, args.debug_log, {**log_context, "step": "row_done", "classification_duration_ms": classification_ms, "generation_duration_ms": generation_ms, "generation_provider": generation_provider, "generation_model": generation_model, "generation_skipped": generation_skipped, "generation_skip_reason": generation_skip_reason, "error": None})
     except Exception as exc:
         print(f"[ROW ERROR] {propid} image {index}/{total} | Asset_FileID={asset_fileid} | {exc}", file=sys.stderr)
         logger.log({**log_context, "step": "error", "ai_amenity_category": None, "ai_amenity_score": None, "duration_ms": None, "error": str(exc)})
