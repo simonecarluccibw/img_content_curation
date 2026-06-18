@@ -65,8 +65,8 @@ content_generation:
     Return valid JSON only with exactly these keys:
     Caption_Experience, Description_Experience, Alt_Text, Check_Room.
 
-Caption_Experience maximum 50 characters including spaces.
-Description_Experience maximum 100 characters including spaces.
+    Caption_Experience maximum 50 characters including spaces.
+    Description_Experience maximum 100 characters including spaces.
 
 
 generation:
