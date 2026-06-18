@@ -1,0 +1,325 @@
+diff --git a/pipeline.py b/pipeline.py
+--- a/pipeline.py
++++ b/pipeline.py
+@@ -176,6 +176,12 @@ def parse_args() -> argparse.Namespace:
+         action="store_true",
+         help="Print a cost and call estimate without processing any image.",
+     )
++    parser.add_argument(
++        "--compare-model-costs",
++        action="store_true",
++        help="In dry run, compare total estimates for models listed in cost.compare_content_models.",
++    )
+     parser.add_argument(
+         "--debug-log",
+         action="store_true",
+@@ -1234,19 +1240,60 @@ def process_hotel(
+     print(f"[DONE] {propid} | wrote {output_path}")
+     return enriched_rows
+ 
+ 
+-def run_dry(selected_propids: List[str], groups: Dict[str, List[Dict]], hotel_names: Dict[str, str], prompts_config: Dict, workers: int = 5) -> int:
+-    cost_section = prompts_config.get("cost", {})
+-    class_cost = cost_section.get("classification_per_call_usd", 0.00056)
+-    gen_cost = cost_section.get("generation_per_call_usd", 0.00076)
++def get_model_call_cost(prompts_config: Dict, model: str, legacy_key: str = "") -> Tuple[float | None, str | None]:
++    cost_section = prompts_config.get("cost", {}) or {}
++    model_costs = cost_section.get("models", {}) or {}
++    model_entry = model_costs.get(model)
++    if isinstance(model_entry, dict) and "per_call_usd" in model_entry:
++        return float(model_entry["per_call_usd"]), None
++    if isinstance(model_entry, (int, float)):
++        return float(model_entry), None
++    if legacy_key and legacy_key in cost_section:
++        return float(cost_section[legacy_key]), (
++            f"[WARN] Missing cost.models entry for {model}; using legacy cost.{legacy_key}."
++        )
++    return None, f"[WARN] Missing cost.models entry for {model}; skipping cost estimate for this model."
++
++
++def run_dry(
++    selected_propids: List[str],
++    groups: Dict[str, List[Dict]],
++    hotel_names: Dict[str, str],
++    prompts_config: Dict,
++    classification_model: str,
++    content_generation: Dict,
++    workers: int = 5,
++    compare_model_costs: bool = False,
++) -> int:
++    class_cost, class_warning = get_model_call_cost(
++        prompts_config, classification_model, "classification_per_call_usd"
++    )
++    gen_cost, gen_warning = get_model_call_cost(
++        prompts_config, content_generation["model"], "generation_per_call_usd"
++    )
++    if class_warning:
++        print(class_warning)
++    if gen_warning:
++        print(gen_warning)
++    class_cost = class_cost if class_cost is not None else 0.0
++    gen_cost = gen_cost if gen_cost is not None else 0.0
+     per_image = class_cost + gen_cost
+     total_images = 0
+     print("\n[DRY RUN] Estimate summary:")
+-    print(f"Classification model: {prompts_config.get('model', 'unknown')}")
+-    content_section = prompts_config.get("content_generation", {}) or {}
+-    print(f"Content provider: {content_section.get('provider', 'gemini')} | model: {content_section.get('model', prompts_config.get('model', 'unknown'))}")
++    print(f"Classification model: {classification_model}")
++    print(f"Content provider: {content_generation['provider']} | model: {content_generation['model']}")
+     print(f"Per-image cost: ${per_image:.6f} (class ${class_cost:.6f} + gen ${gen_cost:.6f})")
++    print("Cost note: estimate assumes one classification call and one content call per image.")
+     print(f"{'Propid':<12} {'Hotel':<50} {'Images':>8} {'API calls':>10} {'Est. cost $':>12}")
+     print("-" * 96)
+     for propid in selected_propids:
+         n = len(groups[propid])
+@@ -1263,6 +1310,27 @@ def run_dry(selected_propids: List[str], groups: Dict[str, List[Dict]], hotel_na
+     print(f"{'TOTAL':<12} {'':<50} {total_images:>8} {total_images*2:>10} {total_cost:>12.4f}")
+     print(f"\nEstimated time (sequential):        {seq_hours:.1f} hours")
+     print(f"Estimated time ({workers} workers): {par_hours:.1f} hours\n")
++    if compare_model_costs:
++        cost_section = prompts_config.get("cost", {}) or {}
++        compare_models = cost_section.get("compare_content_models", []) or []
++        print("[DRY RUN] Content model cost comparison:")
++        if not compare_models:
++            print("[WARN] No models configured in cost.compare_content_models.")
++        else:
++            print(f"{'Content model':<34} {'Generation/call':>16} {'Total/image':>14} {'Estimated total $':>18}")
++            print("-" * 88)
++            for model in compare_models:
++                candidate_cost, warning = get_model_call_cost(prompts_config, str(model))
++                if candidate_cost is None:
++                    print(warning)
++                    continue
++                candidate_per_image = class_cost + candidate_cost
++                candidate_total = total_images * candidate_per_image
++                print(
++                    f"{str(model):<34} ${candidate_cost:>15.6f} "
++                    f"${candidate_per_image:>13.6f} {candidate_total:>18.4f}"
++                )
++        print()
+     return 0
+@@ -1285,7 +1353,16 @@ def main() -> int:
+     selected_propids = resolve_hotels(args, groups, hotel_names, name_to_propids, output_dir)
+     output_fieldnames = original_fieldnames + [col for col in AMENITY_COLUMNS + CONTENT_COLUMNS if col not in original_fieldnames]
+     if args.dry_run:
+-        return run_dry(selected_propids, groups, hotel_names, prompts_config, workers=args.workers)
++        return run_dry(
++            selected_propids,
++            groups,
++            hotel_names,
++            prompts_config,
++            classification_model=classification_model,
++            content_generation=content_generation,
++            workers=args.workers,
++            compare_model_costs=args.compare_model_costs,
++        )
+ 
+     logger = RunLogger(Path(args.log_dir))
+     print(f"[LOG] Detailed run log: {logger.path}")
+diff --git a/prompts.yaml b/prompts.yaml
+--- a/prompts.yaml
++++ b/prompts.yaml
+@@ -113,7 +113,18 @@ classification:
+   temperature: 0.1
+   max_output_tokens: 200
+   thinking_budget: 0
+-cost_per_call_usd: 0.000125
++cost:
++  # Average estimated cost per API call. Update manually when model pricing changes.
++  # Dry run uses model names, not providers, for estimates.
++  models:
++    gemini-3.1-flash-lite:
++      per_call_usd: 0.000125
++    openai/gpt-4o-mini:
++      per_call_usd: 0.000150
++    openai/gpt-4o:
++      per_call_usd: 0.001000
++  compare_content_models:
++    - openai/gpt-4o-mini
++    - openai/gpt-4o
+ amenity_taxonomy:
+   - category: "Spa / Wellness Center"
+     keywords: "Use for images where a spa or wellness facility is clearly visible, including treatment rooms, massage tables, sauna, steam room, spa reception, wellness corridors, indoor spa pools, hydrotherapy areas, or calm wellness spaces. Do not use for standard guest bathrooms, generic pools, fitness rooms, or ordinary lounge seating."
+diff --git a/test_pipeline_content_generation.py b/test_pipeline_content_generation.py
+--- a/test_pipeline_content_generation.py
++++ b/test_pipeline_content_generation.py
+@@ -1,4 +1,6 @@
+ import argparse
++import contextlib
++import io
+ import json
+ import tempfile
+ import unittest
+@@ -337,6 +339,100 @@ class PipelineContentGenerationTests(unittest.TestCase):
+         self.assertEqual(numbered[0]["Amenity_CustomTag3"], "spa-attribute-N-extra")
+         self.assertEqual(numbered[0]["Amenity_CustomTags"], "amenity-spa, spa-attribute-7, spa-attribute-N-extra")
+ 
++    def capture_dry_run(self, config, provider="openrouter", compare=False):
++        classification_model = config.get("model", "gemini-3.1-flash-lite")
++        config = dict(config)
++        content_generation = pipeline.get_content_generation_config(config, classification_model)
++        content_generation["provider"] = provider
++        groups = {"77519": [{}, {}]}
++        hotel_names = {"77519": "Test Hotel"}
++        output = io.StringIO()
++        with contextlib.redirect_stdout(output):
++            pipeline.run_dry(
++                ["77519"],
++                groups,
++                hotel_names,
++                config,
++                classification_model=classification_model,
++                content_generation=content_generation,
++                workers=5,
++                compare_model_costs=compare,
++            )
++        return output.getvalue()
++
++    def test_dry_run_uses_model_specific_costs_for_active_models(self):
++        config = {
++            "model": "gemini-3.1-flash-lite",
++            "content_generation": {"provider": "openrouter", "model": "openai/gpt-4o-mini"},
++            "cost": {
++                "models": {
++                    "gemini-3.1-flash-lite": {"per_call_usd": 0.000125},
++                    "openai/gpt-4o-mini": {"per_call_usd": 0.000150},
++                }
++            },
++        }
++
++        output = self.capture_dry_run(config)
++
++        self.assertIn("Classification model: gemini-3.1-flash-lite", output)
++        self.assertIn("Content provider: openrouter | model: openai/gpt-4o-mini", output)
++        self.assertIn("Per-image cost: $0.000275 (class $0.000125 + gen $0.000150)", output)
++
++    def test_dry_run_compare_model_costs_prints_configured_models(self):
++        config = {
++            "model": "gemini-3.1-flash-lite",
++            "content_generation": {"provider": "openrouter", "model": "openai/gpt-4o-mini"},
++            "cost": {
++                "models": {
++                    "gemini-3.1-flash-lite": {"per_call_usd": 0.000125},
++                    "openai/gpt-4o-mini": {"per_call_usd": 0.000150},
++                    "openai/gpt-4o": {"per_call_usd": 0.001000},
++                },
++                "compare_content_models": ["openai/gpt-4o-mini", "openai/gpt-4o"],
++            },
++        }
++
++        output = self.capture_dry_run(config, compare=True)
++
++        self.assertIn("[DRY RUN] Content model cost comparison:", output)
++        self.assertIn("openai/gpt-4o-mini", output)
++        self.assertIn("openai/gpt-4o", output)
++        self.assertIn("$       0.001000", output)
++
++    def test_dry_run_compare_model_costs_warns_and_skips_missing_cost(self):
++        config = {
++            "model": "gemini-3.1-flash-lite",
++            "content_generation": {"provider": "openrouter", "model": "openai/gpt-4o-mini"},
++            "cost": {
++                "models": {
++                    "gemini-3.1-flash-lite": {"per_call_usd": 0.000125},
++                    "openai/gpt-4o-mini": {"per_call_usd": 0.000150},
++                },
++                "compare_content_models": ["missing/model"],
++            },
++        }
++
++        output = self.capture_dry_run(config, compare=True)
++
++        self.assertIn("[WARN] Missing cost.models entry for missing/model", output)
++        self.assertNotIn("missing/model          $", output)
++
++    def test_dry_run_falls_back_to_legacy_cost_keys_for_active_models(self):
++        config = {
++            "model": "gemini-legacy",
++            "content_generation": {"provider": "openrouter", "model": "openrouter-legacy"},
++            "cost": {
++                "classification_per_call_usd": 0.000500,
++                "generation_per_call_usd": 0.000700,
++            },
++        }
++
++        output = self.capture_dry_run(config)
++
++        self.assertIn("using legacy cost.classification_per_call_usd", output)
++        self.assertIn("using legacy cost.generation_per_call_usd", output)
++        self.assertIn("Per-image cost: $0.001200 (class $0.000500 + gen $0.000700)", output)
++
++    def test_dry_run_cost_depends_on_model_not_provider(self):
++        config = {
++            "model": "gemini-3.1-flash-lite",
++            "content_generation": {"provider": "openrouter", "model": "openai/gpt-4o-mini"},
++            "cost": {
++                "models": {
++                    "gemini-3.1-flash-lite": {"per_call_usd": 0.000125},
++                    "openai/gpt-4o-mini": {"per_call_usd": 0.000150},
++                }
++            },
++        }
++
++        openrouter_output = self.capture_dry_run(config, provider="openrouter")
++        gemini_output = self.capture_dry_run(config, provider="gemini")
++
++        self.assertIn("Per-image cost: $0.000275", openrouter_output)
++        self.assertIn("Per-image cost: $0.000275", gemini_output)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -322,6 +322,45 @@ Il dry run non processa immagini. Stima:
+ - costo stimato;
+ - tempo indicativo.
+ 
++Il costo e calcolato in base ai modelli configurati, non al provider. La classificazione usa il modello top-level `model`, mentre la generazione testi usa `content_generation.model`.
++
++Configura i costi medi per chiamata in `prompts.yaml`:
++
++```yaml
++cost:
++  models:
++    gemini-3.1-flash-lite:
++      per_call_usd: 0.000125
++    openai/gpt-4o-mini:
++      per_call_usd: 0.000150
++    openai/gpt-4o:
++      per_call_usd: 0.001000
++  compare_content_models:
++    - openai/gpt-4o-mini
++    - openai/gpt-4o
++```
++
++La stima per immagine e:
++
++```text
++costo modello classificazione + costo modello generazione content
++```
++
++Per confrontare piu modelli content:
++
++```bash
++python pipeline.py --input data.csv --next-hotels 5 --workers 15 --dry-run --compare-model-costs
++```
++
++La tabella comparativa usa i modelli elencati in:
++
++```yaml
++cost:
++  compare_content_models:
++    - openai/gpt-4o-mini
++    - openai/gpt-4o
++```
++
++Se un modello non ha un costo in `cost.models`, la dry run mostra un warning e lo salta nel confronto. Per il modello attivo, se mancano i costi model based, usa le vecchie chiavi `classification_per_call_usd` e `generation_per_call_usd` solo come fallback.
++
++Nota: la dry run assume una chiamata classificazione e una chiamata content per ogni immagine. Se alcune immagini saranno classificate `Other`, il costo reale potra essere piu basso perche la generazione testi viene saltata.
++
+ ## Output Pipeline
+ 
+ Per ogni hotel viene creato un CSV:
