@@ -1,6 +1,7 @@
 import argparse
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import pipeline
@@ -9,6 +10,14 @@ import pipeline
 class DummyLogger:
     def log(self, record):
         pass
+
+
+class CaptureLogger:
+    def __init__(self):
+        self.records = []
+
+    def log(self, record):
+        self.records.append(dict(record))
 
 
 class DummyResponse:
@@ -25,7 +34,55 @@ class DummyResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
+VALID_TAXONOMY = [{
+    "category": "Pool",
+    "keywords": "Use for visible hotel pools.",
+    "codes": "3",
+    "maxcategoria": "Pool",
+    "custom_tag_1": "overview-pool",
+    "custom_tag_2": "amenity-pool",
+    "custom_tag_3": "experience-pool-N",
+    "custom_tag_4": "",
+}]
+
+CONTENT_GENERATION = {
+    "provider": "openrouter",
+    "model": "openai/gpt-4o-mini",
+    "temperature": 1.0,
+    "max_tokens": 500,
+}
+
+GENERATED_CONTENT = {
+    "Caption_Experience": "By the water.",
+    "Description_Experience": "A bright pool moment with room to unwind.",
+    "Alt_Text": "Outdoor hotel pool",
+    "Check_Room": "0",
+    "_generation_provider": "openrouter",
+    "_generation_model": "openai/gpt-4o-mini",
+}
+
+
 class PipelineContentGenerationTests(unittest.TestCase):
+    def call_enrich_with_classification(self, classification_result):
+        with mock.patch("pipeline.download_image_bytes", return_value=(b"fake-image", "image/jpeg")), \
+             mock.patch("pipeline.call_gemini_classification", return_value=classification_result), \
+             mock.patch("pipeline.generate_content", return_value=dict(GENERATED_CONTENT)) as generate_content:
+            result = pipeline.enrich_row(
+                row={"Asset_Link": "https://example.com/image.jpg", "Listing_Name": "Test Hotel"},
+                gemini_api_key="gemini-key",
+                openrouter_api_key="openrouter-key",
+                classification_model="gemini-3.1-flash-lite",
+                content_generation=dict(CONTENT_GENERATION),
+                config={},
+                taxonomy=VALID_TAXONOMY,
+                timeout=10,
+                max_retries=1,
+                logger=DummyLogger(),
+                log_context={"propid": "77519", "asset_fileid": "asset-1"},
+                debug_log=False,
+            )
+        return result, generate_content
+
     def test_content_generation_config_uses_openrouter_model_from_prompts(self):
         config = {
             "content_generation": {
@@ -120,6 +177,76 @@ class PipelineContentGenerationTests(unittest.TestCase):
         image_part = captured["payload"]["messages"][0]["content"][1]
         self.assertEqual(image_part["type"], "image_url")
         self.assertTrue(image_part["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    def test_enrich_row_skips_content_generation_for_other_category(self):
+        result, generate_content = self.call_enrich_with_classification({"category": pipeline.OTHER, "score": 0.95})
+
+        generate_content.assert_not_called()
+        self.assertEqual(result["Amenity_Category"], pipeline.OTHER)
+        self.assertEqual(result["Caption_Experience"], "")
+        self.assertEqual(result["Description_Experience"], "")
+        self.assertEqual(result["Alt_Text"], "")
+        self.assertEqual(result["Check_Room"], "0")
+        self.assertEqual(result["_generation_ms"], 0)
+        self.assertTrue(result["_generation_skipped"])
+        self.assertEqual(result["_generation_skip_reason"], "amenity_category_other")
+
+    def test_enrich_row_skips_content_generation_for_low_score_category(self):
+        result, generate_content = self.call_enrich_with_classification({"category": "Pool", "score": 0.1})
+
+        generate_content.assert_not_called()
+        self.assertEqual(result["Amenity_Category"], pipeline.OTHER)
+        self.assertEqual(result["Caption_Experience"], "")
+        self.assertEqual(result["Description_Experience"], "")
+        self.assertEqual(result["Alt_Text"], "")
+        self.assertEqual(result["Check_Room"], "0")
+
+    def test_enrich_row_keeps_content_generation_for_valid_category(self):
+        result, generate_content = self.call_enrich_with_classification({"category": "Pool", "score": 0.9})
+
+        generate_content.assert_called_once()
+        self.assertEqual(result["Amenity_Category"], "Pool")
+        self.assertEqual(result["Caption_Experience"], GENERATED_CONTENT["Caption_Experience"])
+        self.assertEqual(result["Description_Experience"], GENERATED_CONTENT["Description_Experience"])
+        self.assertEqual(result["Alt_Text"], GENERATED_CONTENT["Alt_Text"])
+
+    def test_process_single_image_logs_skipped_generation_for_other(self):
+        logger = CaptureLogger()
+        args = argparse.Namespace(
+            api_key="gemini-key",
+            openrouter_api_key="openrouter-key",
+            timeout=10,
+            max_retries=1,
+            debug_log=False,
+            request_delay=0,
+        )
+
+        with mock.patch("pipeline.download_image_bytes", return_value=(b"fake-image", "image/jpeg")), \
+             mock.patch("pipeline.call_gemini_classification", return_value={"category": pipeline.OTHER, "score": 0.95}), \
+             mock.patch("pipeline.generate_content") as generate_content, \
+             mock.patch("pipeline.append_checkpoint"):
+            result = pipeline._process_single_image(
+                index=1,
+                total=1,
+                row={"Asset_FileID": "asset-1", "Asset_Link": "https://example.com/image.jpg"},
+                propid="77519",
+                hotel_name="Test Hotel",
+                args=args,
+                config={},
+                classification_model="gemini-3.1-flash-lite",
+                content_generation=dict(CONTENT_GENERATION),
+                taxonomy=VALID_TAXONOMY,
+                logger=logger,
+                sidecar=Path("unused.progress.jsonl"),
+                checkpoint_lock=mock.Mock(),
+            )
+
+        generate_content.assert_not_called()
+        self.assertEqual(result["Amenity_Category"], pipeline.OTHER)
+        generation_logs = [record for record in logger.records if record.get("step") == "generation"]
+        self.assertEqual(len(generation_logs), 1)
+        self.assertTrue(generation_logs[0]["skipped"])
+        self.assertEqual(generation_logs[0]["skip_reason"], "amenity_category_other")
 
     def test_numbered_custom_tags_increment_for_same_template(self):
         rows = [
