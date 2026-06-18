@@ -1,7 +1,7 @@
 diff --git a/pipeline.py b/pipeline.py
 --- a/pipeline.py
 +++ b/pipeline.py
-@@ -974,24 +974,31 @@ def enrich_row(
+@@ -974,22 +974,35 @@ def enrich_row(
      classification_ms = int((time.perf_counter() - t0) * 1000)
      amenity_fields = resolve_amenity_fields(classification_result["category"], classification_result["score"], taxonomy)
  
@@ -53,7 +53,7 @@ diff --git a/pipeline.py b/pipeline.py
  
      return {
          **amenity_fields,
-@@ -1053,6 +1060,8 @@ def _process_single_image(
+@@ -1053,6 +1066,8 @@ def _process_single_image(
          classification_error = ai_values.pop("_classification_error", None)
          generation_provider = ai_values.pop("_generation_provider", content_generation["provider"])
          generation_model = ai_values.pop("_generation_model", content_generation["model"])
@@ -62,7 +62,7 @@ diff --git a/pipeline.py b/pipeline.py
          enriched.update(ai_values)
  
          logger.log({**log_context, "step": "classification", "ai_amenity_category": enriched.get("Amenity_Category"), "ai_amenity_score": score, "duration_ms": classification_ms, "error": classification_error})
-@@ -1068,6 +1077,8 @@ def _process_single_image(
+@@ -1068,6 +1083,8 @@ def _process_single_image(
              "Check_Room": enriched.get("Check_Room"),
              "duration_ms": generation_ms,
              "error": None,
