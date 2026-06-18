@@ -34,6 +34,12 @@ AMENITY_COLUMNS = [
     "Amenity_CustomTag4",
     "Amenity_CustomTags",
 ]
+CUSTOM_TAG_COLUMNS = [
+    "Amenity_CustomTag1",
+    "Amenity_CustomTag2",
+    "Amenity_CustomTag3",
+    "Amenity_CustomTag4",
+]
 CONTENT_COLUMNS = [
     "Caption_Experience",
     "Description_Experience",
@@ -462,6 +468,38 @@ def join_custom_tags(values: Sequence[str]) -> str:
     return ", ".join(value.strip() for value in values if value and value.strip())
 
 
+def is_numbered_tag_template(value: str) -> bool:
+    return bool(value and value.strip().endswith("-N"))
+
+
+def materialize_numbered_tag_template(value: str, index: int) -> str:
+    stripped = value.strip()
+    return f"{stripped[:-2]}-{index}"
+
+
+def number_custom_tag_placeholders_for_hotel(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
+    next_index_by_template: Dict[str, int] = {}
+    numbered_rows: List[Dict[str, str]] = []
+    for row in rows:
+        numbered = dict(row)
+        templates = []
+        for column in CUSTOM_TAG_COLUMNS:
+            value = (numbered.get(column) or "").strip()
+            if is_numbered_tag_template(value) and value not in templates:
+                templates.append(value)
+        if templates:
+            row_index = max(next_index_by_template.get(template, 1) for template in templates)
+            for column in CUSTOM_TAG_COLUMNS:
+                value = (numbered.get(column) or "").strip()
+                if value in templates:
+                    numbered[column] = materialize_numbered_tag_template(value, row_index)
+            for template in templates:
+                next_index_by_template[template] = row_index + 1
+        numbered["Amenity_CustomTags"] = join_custom_tags([numbered.get(column, "") for column in CUSTOM_TAG_COLUMNS])
+        numbered_rows.append(numbered)
+    return numbered_rows
+
+
 def harmonize_row_schema(row: Dict[str, str]) -> Dict[str, str]:
     normalized = dict(row)
     normalized["Amenity_Category"] = normalized.get("Amenity_Category") or normalized.get("AI_Amenity_Category", "")
@@ -491,12 +529,7 @@ def harmonize_row_schema(row: Dict[str, str]) -> Dict[str, str]:
     normalized["Check_Room"] = coerce_check_room(
         normalized.get("Check_Room", normalized.get("AI_Check_Room", "0"))
     )
-    normalized["Amenity_CustomTags"] = join_custom_tags([
-        normalized.get("Amenity_CustomTag1", ""),
-        normalized.get("Amenity_CustomTag2", ""),
-        normalized.get("Amenity_CustomTag3", ""),
-        normalized.get("Amenity_CustomTag4", ""),
-    ])
+    normalized["Amenity_CustomTags"] = join_custom_tags([normalized.get(column, "") for column in CUSTOM_TAG_COLUMNS])
     return normalized
 
 
@@ -1194,6 +1227,7 @@ def process_hotel(
         else:
             enriched_rows.append(harmonize_row_schema(next(processed_iter)))
 
+    enriched_rows = number_custom_tag_placeholders_for_hotel(enriched_rows)
     write_hotel_csv(output_path, fieldnames, enriched_rows)
     sidecar.unlink(missing_ok=True)
     print(f"[DONE] {propid} | wrote {output_path}")
@@ -1255,7 +1289,9 @@ def main() -> int:
             output_path = expected_output_path(output_dir, propid, hotel_name)
             if output_path.exists() and not args.force:
                 print(f"[SKIP] {propid} | {hotel_name} | output exists: {output_path}")
-                update_cumulative_csv(cumulative_output_path(output_dir), output_fieldnames, propid, read_output_csv(output_path))
+                hotel_rows = number_custom_tag_placeholders_for_hotel(read_output_csv(output_path))
+                write_hotel_csv(output_path, output_fieldnames, hotel_rows)
+                update_cumulative_csv(cumulative_output_path(output_dir), output_fieldnames, propid, hotel_rows)
                 continue
             enriched_rows = process_hotel(
                 propid=propid,
