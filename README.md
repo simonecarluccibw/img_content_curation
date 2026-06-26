@@ -81,9 +81,11 @@ Per ogni immagine la pipeline esegue questi passaggi:
 
 ## Input CSV
 
-Il CSV sorgente deve usare `;` come delimitatore.
+Il CSV sorgente deve usare `;` come delimitatore. La pipeline accetta sia il formato
+nativo con colonne `Listing_*` / `Asset_*`, sia il formato ICE/export come
+`data-world2.csv`.
 
-Colonne minime:
+Colonne minime formato nativo:
 
 - `Listing_MappedID`
 - `Listing_Name`
@@ -98,6 +100,22 @@ Colonne consigliate, usate per prompt, export o naming:
 - `Asset_PublicID`
 - `Asset_Caption`
 - `Asset_MediaType`
+
+Colonne equivalenti supportate nel formato ICE/export:
+
+| Formato ICE/export | Formato pipeline |
+| --- | --- |
+| `MappedID` | `Listing_MappedID` |
+| `Hotel` | `Listing_Name` |
+| `IceID` | `Listing_ICEID` |
+| `AssetType` | `Asset_MediaType` |
+| `Index` | `Asset_Index` |
+| `PublicID` | `Asset_PublicID` |
+| `Caption` | `Asset_Caption` |
+| `URL` | `Asset_Link` |
+
+Quando legge il formato ICE/export, la pipeline preserva le colonne originali e
+aggiunge le colonne interne necessarie all'elaborazione.
 
 Esempio di run:
 
@@ -128,23 +146,23 @@ La sezione `content_generation` controlla solo questi campi:
 - `Alt_Text`
 - `Check_Room`
 
-Esempio con OpenRouter:
-
-```yaml
-content_generation:
-  provider: openrouter
-  model: openai/gpt-4o-mini
-  temperature: 1.0
-  max_tokens: 500
-  thinking_budget: 0
-```
-
 Esempio con Gemini:
 
 ```yaml
 content_generation:
   provider: gemini
   model: gemini-3.1-flash-lite
+  temperature: 1.0
+  max_tokens: 500
+  thinking_budget: 0
+```
+
+Esempio con OpenRouter:
+
+```yaml
+content_generation:
+  provider: openrouter
+  model: openai/gpt-4o-mini
   temperature: 1.0
   max_tokens: 500
   thinking_budget: 0

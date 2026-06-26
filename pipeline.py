@@ -50,6 +50,17 @@ CONTENT_RESPONSE_KEYS = CONTENT_COLUMNS
 CLASSIFICATION_SCORE_THRESHOLD = 0.4
 OTHER = "Other"
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+INPUT_COLUMN_ALIASES = {
+    "Listing_MappedID": "MappedID",
+    "Listing_Name": "Hotel",
+    "Listing_ICEID": "IceID",
+    "Asset_MediaType": "AssetType",
+    "Asset_Index": "Index",
+    "Asset_PublicID": "PublicID",
+    "Asset_Caption": "Caption",
+    "Asset_Link": "URL",
+}
+REQUIRED_INPUT_COLUMNS = ["Listing_MappedID", "Listing_Name", "Asset_Link"]
 CLASSIFICATION_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -237,6 +248,46 @@ def read_rows(csv_path: Path) -> Tuple[List[Dict[str, str]], List[str]]:
         if not reader.fieldnames:
             raise RuntimeError("Input CSV has no header.")
         return rows, list(reader.fieldnames)
+
+
+def normalize_input_rows(rows: List[Dict[str, str]], fieldnames: List[str]) -> Tuple[List[Dict[str, str]], List[str]]:
+    normalized_fieldnames = list(fieldnames)
+    present_fieldnames = set(fieldnames)
+
+    for target_column, source_column in INPUT_COLUMN_ALIASES.items():
+        if target_column not in present_fieldnames and source_column in present_fieldnames:
+            normalized_fieldnames.append(target_column)
+            present_fieldnames.add(target_column)
+
+    for row in rows:
+        for target_column, source_column in INPUT_COLUMN_ALIASES.items():
+            if target_column in present_fieldnames and not (row.get(target_column) or "").strip():
+                row[target_column] = (row.get(source_column) or "").strip()
+
+    missing_columns = [column for column in REQUIRED_INPUT_COLUMNS if column not in present_fieldnames]
+    if missing_columns:
+        raise RuntimeError(
+            "Input CSV is missing required columns after alias normalization: "
+            f"{', '.join(missing_columns)}. Present columns: {', '.join(fieldnames)}."
+        )
+
+    missing_values: List[str] = []
+    for row_number, row in enumerate(rows, start=2):
+        missing_row_columns = [
+            column for column in REQUIRED_INPUT_COLUMNS
+            if not (row.get(column) or "").strip()
+        ]
+        if missing_row_columns:
+            missing_values.append(f"row {row_number}: {', '.join(missing_row_columns)}")
+        if len(missing_values) >= 5:
+            break
+    if missing_values:
+        raise RuntimeError(
+            "Input CSV has empty required values after alias normalization: "
+            f"{'; '.join(missing_values)}. Present columns: {', '.join(fieldnames)}."
+        )
+
+    return rows, normalized_fieldnames
 
 
 def normalize_name(value: str) -> str:
@@ -1291,9 +1342,10 @@ def main() -> int:
     taxonomy = prompts_config.get("amenity_taxonomy", [])
 
     rows, original_fieldnames = read_rows(input_path)
+    rows, input_fieldnames = normalize_input_rows(rows, original_fieldnames)
     groups, hotel_names, name_to_propids = build_indexes(rows)
     selected_propids = resolve_hotels(args, groups, hotel_names, name_to_propids, output_dir)
-    output_fieldnames = original_fieldnames + [col for col in AMENITY_COLUMNS + CONTENT_COLUMNS if col not in original_fieldnames]
+    output_fieldnames = input_fieldnames + [col for col in AMENITY_COLUMNS + CONTENT_COLUMNS if col not in input_fieldnames]
     if args.dry_run:
         return run_dry(selected_propids, groups, hotel_names, prompts_config, workers=args.workers)
 

@@ -64,6 +64,57 @@ GENERATED_CONTENT = {
 
 
 class PipelineContentGenerationTests(unittest.TestCase):
+    def test_normalize_input_rows_keeps_native_pipeline_columns(self):
+        rows = [{
+            "Listing_MappedID": "77519",
+            "Listing_Name": "Example Hotel",
+            "Asset_Link": "https://example.com/image.jpg",
+        }]
+        fieldnames = ["Listing_MappedID", "Listing_Name", "Asset_Link"]
+
+        normalized_rows, normalized_fieldnames = pipeline.normalize_input_rows(rows, fieldnames)
+
+        self.assertEqual(normalized_rows, rows)
+        self.assertEqual(normalized_fieldnames, fieldnames)
+
+    def test_normalize_input_rows_accepts_ice_export_columns(self):
+        rows = [{
+            "IceID": "45179",
+            "MappedID": "1007",
+            "Hotel": "BEST WESTERN Catalina Inn",
+            "AssetType": "PH",
+            "Index": "1",
+            "PublicID": "119676188",
+            "Caption": "King Guest Room",
+            "URL": "https://media.iceportal.com/45179/31276508.jpg",
+        }]
+        fieldnames = ["IceID", "MappedID", "Hotel", "AssetType", "Index", "PublicID", "Caption", "URL"]
+
+        normalized_rows, normalized_fieldnames = pipeline.normalize_input_rows(rows, fieldnames)
+
+        self.assertEqual(normalized_rows[0]["Listing_MappedID"], "1007")
+        self.assertEqual(normalized_rows[0]["Listing_Name"], "BEST WESTERN Catalina Inn")
+        self.assertEqual(normalized_rows[0]["Listing_ICEID"], "45179")
+        self.assertEqual(normalized_rows[0]["Asset_MediaType"], "PH")
+        self.assertEqual(normalized_rows[0]["Asset_Index"], "1")
+        self.assertEqual(normalized_rows[0]["Asset_PublicID"], "119676188")
+        self.assertEqual(normalized_rows[0]["Asset_Caption"], "King Guest Room")
+        self.assertEqual(normalized_rows[0]["Asset_Link"], "https://media.iceportal.com/45179/31276508.jpg")
+        self.assertEqual(normalized_fieldnames[:len(fieldnames)], fieldnames)
+        self.assertIn("Listing_MappedID", normalized_fieldnames)
+        self.assertIn("Asset_Link", normalized_fieldnames)
+
+    def test_normalize_input_rows_errors_when_required_alias_value_is_empty(self):
+        rows = [{
+            "MappedID": "1007",
+            "Hotel": "BEST WESTERN Catalina Inn",
+            "URL": "",
+        }]
+        fieldnames = ["MappedID", "Hotel", "URL"]
+
+        with self.assertRaisesRegex(RuntimeError, "row 2: Asset_Link"):
+            pipeline.normalize_input_rows(rows, fieldnames)
+
     def call_enrich_with_classification(self, classification_result):
         with mock.patch("pipeline.download_image_bytes", return_value=(b"fake-image", "image/jpeg")), \
              mock.patch("pipeline.call_gemini_classification", return_value=classification_result), \
